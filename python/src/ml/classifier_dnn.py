@@ -52,11 +52,15 @@ from sklearn.linear_model import SGDClassifier
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import scale, StandardScaler
+from transformers import DistilBertTokenizer,DistilBertForSequenceClassification
+from sklearn.metrics import roc_auc_score
 
 import torch
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
 from transformers import BertTokenizer, BertForSequenceClassification
 from sklearn.model_selection import train_test_split
+import torch.nn as nn
+import torch.nn.functional as F
 
 import pandas as pd
 import numpy as np
@@ -71,6 +75,8 @@ from ml import nlp
 from ml import text_preprocess as tp
 from ml import dnn_model_creator as dmc
 from ml import five_words_selector as fws
+#Load Optimus class
+from ml.optimus import Optimus, plot_text_heatmap
 
 from keras.utils import to_categorical 
 	
@@ -83,6 +89,8 @@ from itertools import chain
 from sklearn.metrics import log_loss
 import matplotlib.pyplot as plt
 
+
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -91,6 +99,23 @@ MAX_SEQUENCE_LENGTH = 100  # maximum # of words allowed in a tweet
 WORD_EMBEDDING_DIM_OUTPUT = 300
 WORD_EMBEDDING_DIM_OUTPUT = 300
 CPUS = 1
+
+class TripletLoss(nn.Module):
+    def __init__(self, margin=1.0):
+        super(TripletLoss, self).__init__()
+        self.margin = margin
+
+    def forward(self, anchor, positive, negative):
+        # Calculate the distance between anchor and positive examples
+        pos_dist = nn.functional.pairwise_distance(anchor, positive, 2)
+
+        # Calculate the distance between anchor and negative examples
+        neg_dist = nn.functional.pairwise_distance(anchor, negative, 2)
+
+        # Calculate the triplet loss
+        loss = nn.functional.relu(pos_dist - neg_dist + self.margin)
+
+        return loss.mean()
 
 
 def get_word_vocab(tweets, out_folder, normalize_option):
@@ -205,6 +230,7 @@ def create_model(model_descriptor: str, max_index=100, wemb_matrix=None, wdist_m
         model = dmc.create_final_model_with_concat_cnn(embedding_layers, model_descriptor)
     else:
         print("model starts doesnot start with b_ and f_")
+        print(embedding_layers)
         model = dmc.create_model_without_branch(embedding_layers, model_descriptor)
     # create_model_conv_lstm_multi_filter(embedding_layer)
 
@@ -398,11 +424,11 @@ def grid_search_dnn(dataset_name, outfolder, model_descriptor: str,
     
 
     model = KerasClassifier(model=create_model_with_args, verbose=0, batch_size=100,
-                            epochs=1,random_state = 143)
+                            epochs=2,random_state = 143)
     adversial_non_hate_model = KerasClassifier(model=create_model_with_args, verbose=0, batch_size=100,
-                            epochs=1,random_state = 143)
+                            epochs=2,random_state = 143)
     adversial_select_model = KerasClassifier(model=create_model_with_args, verbose=0, batch_size=100,
-                            epochs=1,random_state = 143)
+                            epochs=2,random_state = 143)
     #
     # nfold_predictions = cross_val_predict(model, X_train, y_train, cv=nfold)
 
@@ -469,6 +495,10 @@ def grid_search_dnn(dataset_name, outfolder, model_descriptor: str,
 
     adversial_non_hate_nfold_predictions = adversial_non_hate_model.predict(X_test_non_hate)
     adversial_select_nfold_predictions = adversial_select_model.predict(X_test_data_common)
+    
+    adversial_non_hate_nfold_prediction = adversial_non_hate_model.predict(Adversial_non_hate_X_train_data)
+    adversial_select_nfold_prediction = adversial_select_model.predict(Adversial_select_X_train_data)
+    
     # adversial_nfold_predictions_test = adversial_model.predict(X_test)
     # # nfold_predictions_test_love = model.predict(X_test_love_data)
     # adversial_nfold_predictions_test_non_hate = adversial_model.predict(X_test_non_hate)
@@ -476,6 +506,11 @@ def grid_search_dnn(dataset_name, outfolder, model_descriptor: str,
 
     print("Below is training score")
     print(model.score(X_train,y_train))
+    print("Below is Non Hate Adversarial training score")
+    print(adversial_non_hate_model.score(Adversial_non_hate_X_train_data,adversial_target))
+    print("Below is Select Adversarial training score")
+    print(adversial_select_model.score(Adversial_select_X_train_data,adversial_target))
+    
     print("Below is test score")
     print(model.score(X_test,y_test))
     # print("below is test love score")
@@ -504,6 +539,11 @@ def grid_search_dnn(dataset_name, outfolder, model_descriptor: str,
 
     print("Training classification report")
     print(classification_report(y_train, nfold_predictions))
+    print("Non Hate Adversarial Training classification report")
+    print(classification_report(adversial_target, adversial_non_hate_nfold_prediction))
+    print("Select Adversarial Training classification report")
+    print(classification_report(adversial_target, adversial_select_nfold_prediction))
+    
     print("Test Classification report")
     print(classification_report(y_test, nfold_predictions_test))
     # print("Test Love Classification report")
@@ -930,8 +970,8 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                pretrained_embedding_models=None, expected_embedding_dim=None,
                word_dist_features_file=None, use_mixed_data=False):
 
-    # data_set_name = "hate_speech"
-    data_set_name = "racism_and_sexism"
+    data_set_name = "hate_speech"
+    # data_set_name = "racism_and_sexism"
     
     raw_data = pd.DataFrame()
     if data_set_name == "racism_and_sexism":
@@ -1057,7 +1097,7 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
         print(y_trainval.value_counts())
 
         text_train, text_val, y_train, y_val = train_test_split(
-        text_trainval, y_trainval, stratify=y_trainval, random_state=0)
+        text_trainval, y_trainval, stratify=y_trainval, random_state=143)
 
         print(y_train.value_counts())
 
@@ -1500,7 +1540,7 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
         # Iterate over the sentences
         for i, sentence in enumerate(adversial_actual_tweets):
             # Select 5 random words from the list
-            random_words = rn.sample(non_hate_set_words_list, 50)
+            random_words = rn.sample(non_hate_set_words_list, 25)
             # Append the random words to the sentence
             adversial_non_hate_text.append(sentence + ' ' + ' '.join(random_words))
             
@@ -1508,7 +1548,7 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
         # Iterate over the sentences
         for i, sentence in enumerate(adversial_actual_tweets):
             # Select 5 random words from the list
-            random_words = rn.sample(select_set_words_list, 50)
+            random_words = rn.sample(select_set_words_list, 25)
             # Append the random words to the sentence
             adversial_select_text.append(sentence + ' ' + ' '.join(random_words))
 
@@ -1622,7 +1662,7 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             train_test_split(M0, raw_data['class'], col_datasource,
                             list(raw_data.index.values),
                             test_size=0.25,
-                            random_state=42)
+                            random_state=143)
         
 
         # print("Checking the test data set ")
@@ -1832,27 +1872,44 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
 
         training_data.reset_index(inplace=True,drop=True)
         testing_data.reset_index(inplace=True,drop=True)
+        
+        
 
         training_data["tweet_select_attack"] = ""
         training_data["tweet_non_hate_attack"] = ""
         testing_data["tweet_select_attack"] = ""
         testing_data["tweet_non_hate_attack"] = ""
 
+        tokenizer = DistilBertTokenizer.from_pretrained(
+            'distilbert-base-uncased',
+            do_lower_case=True
+        )
+           
+        adversial_non_hate_tokenizer = DistilBertTokenizer.from_pretrained(
+            'distilbert-base-uncased',
+            do_lower_case=True
+        )
+        adversial_select_tokenizer = DistilBertTokenizer.from_pretrained(
+            'distilbert-base-uncased',
+            do_lower_case=True
+        )
 
-        tokenizer = BertTokenizer.from_pretrained(
-            'bert-base-uncased',
-            do_lower_case = True
-            )
+
+
+        # tokenizer = BertTokenizer.from_pretrained(
+        #     'bert-base-uncased',
+        #     do_lower_case = True
+        #     )
         
-        adversial_non_hate_tokenizer = BertTokenizer.from_pretrained(
-            'bert-base-uncased',
-            do_lower_case = True
-            )
+        # adversial_non_hate_tokenizer = BertTokenizer.from_pretrained(
+        #     'bert-base-uncased',
+        #     do_lower_case = True
+        #     )
         
-        adversial_select_tokenizer = BertTokenizer.from_pretrained(
-            'bert-base-uncased',
-            do_lower_case = True
-            )
+        # adversial_select_tokenizer = BertTokenizer.from_pretrained(
+        #     'bert-base-uncased',
+        #     do_lower_case = True
+        #     )
 
         for i in range(0,len(training_data)):
             training_data.loc[i,"tweet_select_attack"] = training_data.loc[i,"tweet_without_stopwords"] +" "+ " ".join(random.choices(filtered_sentence, k=50))
@@ -1872,6 +1929,8 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
         print(testing_data.loc[0,"tweet_without_stopwords"])
         print(testing_data.loc[0,"tweet_select_attack"])
         print(testing_data.loc[0,"tweet_non_hate_attack"])
+
+        testing_data.to_csv('Testing_data.csv')
 
         # Concatenate the two columns and reset the index
         combined_non_hate_text = pd.concat([training_data['tweet_without_stopwords'],training_data["tweet_non_hate_attack"]], ignore_index=True)
@@ -2122,32 +2181,81 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             b_specificity = tn / (tn + fp) if (tn + fp) > 0 else 'nan'
             return b_accuracy, b_precision, b_recall, b_specificity
 
-        
-        
-        # Load the BertForSequenceClassification model
-        model = BertForSequenceClassification.from_pretrained(
-            'bert-base-uncased',
-            num_labels = 2,
-            output_attentions = False,
-            output_hidden_states = False,
+
+        model = DistilBertForSequenceClassification.from_pretrained(
+            'distilbert-base-uncased',
+            num_labels=2,
+            output_attentions=True,
+            output_hidden_states=False,
+        )
+        adversial_non_hate_model = DistilBertForSequenceClassification.from_pretrained(
+            'distilbert-base-uncased',
+            num_labels=2,
+            output_attentions=True,
+            output_hidden_states=False,
+        )
+        adversial_select_model = DistilBertForSequenceClassification.from_pretrained(
+            'distilbert-base-uncased',
+            num_labels=2,
+            output_attentions=True,
+            output_hidden_states=False,
+        )
+        triplet_model = DistilBertForSequenceClassification.from_pretrained(
+            'distilbert-base-uncased',
+            num_labels=2,
+            output_attentions=True,
+            output_hidden_states=False,
         )
 
-        adversial_non_hate_model = BertForSequenceClassification.from_pretrained(
-            'bert-base-uncased',
-            num_labels = 2,
-            output_attentions = False,
-            output_hidden_states = False,
-        )
+        # task = 'single_label' 
+        # ionbot = Optimus(model, tokenizer, 2, task, set_of_instance=[])
+        # ionbot_non_hate = Optimus(adversial_non_hate_model, adversial_non_hate_tokenizer, [0,1], task, set_of_instance=[])
+        # ionbot_select = Optimus(adversial_select_model, adversial_select_tokenizer, [0,1], task, set_of_instance=[])
 
-        adversial_select_model = BertForSequenceClassification.from_pretrained(
-            'bert-base-uncased',
-            num_labels = 2,
-            output_attentions = False,
-            output_hidden_states = False,
-        )
+        # #Then select a random instance
+        # instance = "Screw you trump supporters"
+        # prediction, attention, hidden_states = model.my_predict(instance)
+        # print(prediction)
+
+
+        # baseline = ionbot.explain(instance, mode='baseline', level='token', raw_attention='A')
+        # per_instance = ionbot.explain(instance, mode='max_per_instance', level='token', raw_attention='A')
+
+        # selected_label = 1
+        # tokens = baseline[1]
+
+        # plot_text_heatmap(tokens[1:-1], np.array(per_instance[0][selected_label]))
+
+
+        # # Load the BertForSequenceClassification model
+        # model = BertForSequenceClassification.from_pretrained(
+        #     'bert-base-uncased',
+        #     num_labels = 2,
+        #     output_attentions = False,
+        #     output_hidden_states = False,
+        # )
+
+        # adversial_non_hate_model = BertForSequenceClassification.from_pretrained(
+        #     'bert-base-uncased',
+        #     num_labels = 2,
+        #     output_attentions = False,
+        #     output_hidden_states = False,
+        # )
+
+        # adversial_select_model = BertForSequenceClassification.from_pretrained(
+        #     'bert-base-uncased',
+        #     num_labels = 2,
+        #     output_attentions = False,
+        #     output_hidden_states = False,
+        # )
 
         # Recommended learning rates (Adam): 5e-5, 3e-5, 2e-5. See: https://arxiv.org/pdf/1810.04805.pdf
         optimizer = torch.optim.AdamW(model.parameters(), 
+                                    lr = 5e-5,
+                                    eps = 1e-08
+                                    )
+
+        triplet_optimizer = torch.optim.AdamW(triplet_model.parameters(), 
                                     lr = 5e-5,
                                     eps = 1e-08
                                     )
@@ -2167,39 +2275,333 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
         model.cuda()
         adversial_non_hate_model.cuda()
         adversial_select_model.cuda()
+        triplet_model.cuda()
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # Run on GPU
+        model.to(device)
+        adversial_non_hate_model.to(device)
+        adversial_select_model.to(device)
+        triplet_model.to(device)
+
+        # # Move dataloaders to device
+        # train_dataloader = train_dataloader.to(device)
+        # adversial_non_hate_validation_dataloader = adversial_non_hate_validation_dataloader.to(device)
+        # adversial_select_validation_dataloader = adversial_select_validation_dataloader.to(device)
+
+        # # Move optimizer to device
+        # optimizer = torch.optim.AdamW(model.parameters(),lr = 5e-5,eps = 1e-08).to(device)
+        # adversial_non_hate_optimizer = torch.optim.AdamW(adversial_non_hate_model.parameters(),lr = 5e-5,eps = 1e-08).to(device)
+        # adversial_select_optimizer = torch.optim.AdamW(adversial_select_model.parameters(),lr = 5e-5,eps = 1e-08).to(device)
 
         # Recommended number of epochs: 2, 3, 4. See: https://arxiv.org/pdf/1810.04805.pdf
         epochs = 10
 
+        # Define variables to keep track of the best performance of each model
+        best_weighted_auc = {'model': 0, 'non_hate': 0, 'select': 0,'triplet':0}
+        best_models = {'model': None, 'non_hate': None, 'select': None,'triplet':None}
+
+        # Define the loss function as Binary Cross Entropy Loss
+        # loss_fn = nn.CrossEntropyLoss()
+        loss_fn1 = nn.CrossEntropyLoss()
+        loss_fn2 = TripletLoss(margin=1.0)
+
         for _ in trange(epochs, desc = 'Epoch'):
+            
             
             # ========== Training ==========
             
             # Set model to training mode
             model.train()
             
+            # # Tracking variables
+            # tr_loss = 0
+            # nb_tr_examples, nb_tr_steps = 0, 0
+
+            # for step, batch in enumerate(train_dataloader):
+            #     batch = tuple(t.to(device) for t in batch)
+            #     b_input_ids, b_input_mask, b_labels = batch
+            #     optimizer.zero_grad()
+            #     # # Forward pass - Bert
+            #     # train_output = model(b_input_ids, 
+            #     #                     token_type_ids = None, 
+            #     #                     attention_mask = b_input_mask, 
+            #     #                     labels = b_labels)
+                
+            #     # Forward pass - DistilBert
+            #     train_output = model(b_input_ids, 
+            #                         attention_mask = b_input_mask, 
+            #                         labels = b_labels)
+            #     # Backward pass
+            #     train_output.loss.backward()
+            #     optimizer.step()
+            #     # Update tracking variables
+            #     tr_loss += train_output.loss.item()
+            #     nb_tr_examples += b_input_ids.size(0)
+            #     nb_tr_steps += 1
+
+
             # Tracking variables
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
+            y_true, y_pred = [], []
+
+
+            # for step, batch in enumerate(train_dataloader):
+            #     batch = tuple(t.to(device) for t in batch)
+            #     b_input_ids, b_input_mask, b_labels = batch
+            #     optimizer.zero_grad()
+                
+            #     # Forward pass
+            #     train_output = model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+                
+                
+            #     # Calculate loss and update tracking variables
+            #     train_loss = train_output.loss
+            #     tr_loss += train_loss.item()
+            #     nb_tr_examples += b_input_ids.size(0)
+            #     nb_tr_steps += 1
+                
+            #     # Calculate predicted probabilities and true labels for ROC AUC
+            #     logits = train_output.logits
+            #     probs = torch.softmax(logits, dim=-1)
+            #     preds = probs[:, 1]
+            #     y_true.extend(b_labels.cpu().detach().numpy())
+            #     y_pred.extend(preds.cpu().detach().numpy())
+                
+            #     # Backward pass and optimization step
+            #     train_output.loss.backward()
+            #     optimizer.step()
+
+            # # Calculate weighted ROC AUC
+            # weighted_auc = roc_auc_score(y_true, y_pred, average='weighted')
+
+            # # Update best performance and save best models
+            # if weighted_auc > best_weighted_auc['model']:
+            #     best_weighted_auc['model'] = weighted_auc
+            #     best_models['model'] = model
+            #     model_path = 'Trained Models/Best T2 Model/'
+            #     model.save_pretrained(model_path)
+            #     tokenizer.save_pretrained(model_path)
 
             for step, batch in enumerate(train_dataloader):
                 batch = tuple(t.to(device) for t in batch)
                 b_input_ids, b_input_mask, b_labels = batch
                 optimizer.zero_grad()
+
+                # Convert b_labels to one-hot encoded tensor
+                b_labels = F.one_hot(b_labels, num_classes=2).float()
+
+                # print(b_labels.shape)
+
                 # Forward pass
-                train_output = model(b_input_ids, 
-                                    token_type_ids = None, 
-                                    attention_mask = b_input_mask, 
-                                    labels = b_labels)
-                # Backward pass
-                train_output.loss.backward()
-                optimizer.step()
-                # Update tracking variables
-                tr_loss += train_output.loss.item()
+                train_output = model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+
+                # attentions = train_output.attentions
+
+
+                # Calculate loss and update tracking variables
+                train_loss = loss_fn1(train_output.logits, b_labels)
+                tr_loss += train_loss.item()
                 nb_tr_examples += b_input_ids.size(0)
                 nb_tr_steps += 1
+
+                # Calculate predicted probabilities and true labels for ROC AUC
+                probs = torch.softmax(train_output.logits, dim=-1)
+                preds = probs[:, 1]
+                y_true.extend(b_labels.cpu().detach().numpy())
+                y_pred.extend(preds.cpu().detach().numpy())
+
+                # Backward pass and optimization step
+                train_loss.backward()
+                optimizer.step()
+
+            # print(y_true.head())
+            # print(y_pred.head())
+            # Calculate weighted ROC AUC
+            y_true = np.array(y_true)
+            y_pred = np.array(y_pred)
+            weighted_auc = roc_auc_score(y_true[:, 1], y_pred, average='weighted')
+
+            # Update best performance and save best models
+            if weighted_auc > best_weighted_auc['model']:
+                best_weighted_auc['model'] = weighted_auc
+                best_models['model'] = model
+                model_path = 'Trained Models/Best T2 Model/'
+                model.save_pretrained(model_path)
+                tokenizer.save_pretrained(model_path)
+
+            # ------------------------
+            # Creating the Triplet Loss
+
+            # triplet_model.eval()
+            # # positive_ct = torch.zeros(len(token_id),100, device='cuda')
+            # positive_ct = torch.zeros(100, device='cuda')
+            # negative_ct = torch.zeros(100, device='cuda')
+            # # token_pos_num = torch.zeros(len(token_id))
+            # pos_num = 0
+            # neg_num = 0
+
+
+            # for step, eval_batch in enumerate(train_dataloader):
+            #     eval_batch = tuple(t.to(device) for t in eval_batch)
+            #     eval_b_input_ids, eval_b_input_mask, eval_b_labels = eval_batch
+            #     # optimizer.zero_grad()
+
+            #     # Forward pass
+            #     # train_output  = model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+            #     with torch.no_grad():
+            #         # Forward pass
+            #         eval_train_output = triplet_model(eval_b_input_ids, attention_mask=eval_b_input_mask, labels=eval_b_labels)
+            #     attentions = eval_train_output.attentions[1]
+            #     attentions = attentions.mean(dim=(1, 2))
+            #     # after positive = attentions[b_labels==1]. befroe mean, look up for token id
+            #     positive = attentions[eval_b_labels==1].sum(dim=0)
+            #     negative = attentions[eval_b_labels==0].sum(dim=0)
+            #     positive_ct += positive
+            #     negative_ct += negative
+            #     pos_num += (eval_b_labels==1).sum().item()
+            #     neg_num += (eval_b_labels==0).sum().item()
+            # positive_ct = positive_ct/pos_num
+            # negative_ct = negative_ct/neg_num
+            # # positive_ct.size = (batch_size, len(token_id),100)
+                
+
+            # # ========== Training ==========
+            
+            # # Set model to training mode
+            # triplet_model.train()
+
+            # for step, batch in enumerate(train_dataloader):
+            #     batch = tuple(t.to(device) for t in batch)
+            #     b_input_ids, b_input_mask, b_labels = batch
+            #     optimizer.zero_grad()
+
+            #     # Convert b_labels to one-hot encoded tensor
+            #     b_labels = F.one_hot(b_labels, num_classes=2).float()
+
+            #     # Forward pass
+            #     train_output = triplet_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+
+            #     attentions = train_output.attentions
+
+            #     layer_index = 1
+            #     anchor_out = attentions[layer_index].mean(dim=(1, 2))
+            #     positive_out = torch.where(b_labels==1, positive_ct, negative_ct)
+            #     negative_out = torch.where(b_labels==1, negative_ct, positive_ct)
+
+
+            #     # Calculate loss and update tracking variables
+            #     # train_loss = loss_fn1(train_output.logits, b_labels)
+            #     train_loss = loss_fn1(train_output.logits, b_labels)+loss_fn2(anchor_out, positive_out, negative_out)
+            #     tr_loss += train_loss.item()
+            #     nb_tr_examples += b_input_ids.size(0)
+            #     nb_tr_steps += 1
+
+            #     # Calculate predicted probabilities and true labels for ROC AUC
+            #     probs = torch.softmax(train_output.logits, dim=-1)
+            #     preds = probs[:, 1]
+            #     y_true.extend(b_labels.cpu().detach().numpy())
+            #     y_pred.extend(preds.cpu().detach().numpy())
+
+            #     # Backward pass and optimization step
+            #     train_loss.backward()
+            #     optimizer.step()
+
+            triplet_model.eval()
+            positive_ct = torch.zeros(100, device='cuda')
+            negative_ct = torch.zeros(100, device='cuda')
+            pos_num = 0
+            neg_num = 0
+
+            for step, batch in enumerate(train_dataloader):
+                batch = tuple(t.to(device) for t in batch)
+                b_input_ids, b_input_mask, b_labels = batch
+                # print(b_labels.shape)
+                with torch.no_grad():
+                    # Forward pass
+                    eval_train_output = triplet_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+                attentions = eval_train_output.attentions[1]
+                attentions = attentions.mean(dim=(1, 2))
+                # after positive = attentions[b_labels==1]. before mean, look up for token id
+                positive = attentions[b_labels==1].sum(dim=0)
+                negative = attentions[b_labels==0].sum(dim=0)
+                positive_ct += positive
+                negative_ct += negative
+                pos_num += (b_labels==1).sum().item()
+                neg_num += (b_labels==0).sum().item()
+            positive_ct = positive_ct/pos_num
+            negative_ct = negative_ct/neg_num
+
+            # Set model to training mode
+            triplet_model.train()
+
+            triplet_tr_loss = 0
+            triplet_nb_tr_examples, triplet_nb_tr_steps = 0, 0
+            triplet_y_true, triplet_y_pred = [], []
+
+            for step, batch in enumerate(train_dataloader):
+                batch = tuple(t.to(device) for t in batch)
+                b_input_ids, b_input_mask, b_labels = batch
+                triplet_optimizer.zero_grad()
+
+                # print(b_labels.shape)
+
+                # Forward pass
+                train_output = triplet_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+
+                attentions = train_output.attentions
+                layer_index = 1
+                anchor_out = attentions[layer_index].mean(dim=(1, 2))
+                # positive_out = torch.where(b_labels==1, positive_ct, negative_ct)
+                # negative_out = torch.where(b_labels==1, negative_ct, positive_ct)
+                # repeat positive and negative tensors to match the batch size
+                # print(positive_ct)
+                positive_out = torch.where(b_labels==1, positive_ct.repeat(b_labels.size()[0], 1).T, negative_ct.repeat(b_labels.size()[0], 1).T).T
+                negative_out = torch.where(b_labels==1, negative_ct.repeat(b_labels.size()[0], 1).T, positive_ct.repeat(b_labels.size()[0], 1).T).T
+
+                # positive_out = torch.where(b_labels==1, positive_ct.repeat(b_labels.size()[0], 1), negative_ct.repeat(b_labels.size()[0], 1))
+                # negative_out = torch.where(b_labels==1, negative_ct.repeat(b_labels.size()[0], 1), positive_ct.repeat(b_labels.size()[0], 1))
+
+                # positive_out = torch.where(b_labels==1, positive_ct.unsqueeze(0).repeat(b_labels.size()[0], 1), negative_ct.unsqueeze(0).repeat(b_labels.size()[0], 1))
+                # negative_out = torch.where(b_labels==1, negative_ct.unsqueeze(0).repeat(b_labels.size()[0], 1), positive_ct.unsqueeze(0).repeat(b_labels.size()[0], 1))
+
+                # Calculate loss and update tracking variables
+                train_loss = loss_fn1(train_output.logits, b_labels) + loss_fn2(anchor_out, positive_out, negative_out)
+                triplet_tr_loss += train_loss.item()
+                # nb_tr_examples += b_input_ids.size(0)
+                triplet_nb_tr_steps += 1
+
+                # Calculate predicted probabilities and true labels for ROC AUC
+                triplet_probs = torch.softmax(train_output.logits, dim=-1)
+                triplet_preds = triplet_probs[:, 1]
+
+                triplet_y_true.extend(b_labels.cpu().detach().numpy())
+                triplet_y_pred.extend(triplet_preds.cpu().detach().numpy())
+
+                # Backward pass and optimization step
+                train_loss.backward()
+                triplet_optimizer.step()
+
+
+
+            # print(triplet_y_true.head())
+            # print(triplet_y_pred.head())
+            # Calculate weighted ROC AUC
+            triplet_y_true = np.array(triplet_y_true)
+            triplet_y_pred = np.array(triplet_y_pred)
+            # weighted_auc = roc_auc_score(triplet_y_true[:, 1], triplet_y_pred, average='weighted')
+            triplet_weighted_auc = roc_auc_score(triplet_y_true, triplet_y_pred, average='weighted')
+
+            # Update best performance and save best models
+            if triplet_weighted_auc > best_weighted_auc['triplet']:
+                best_weighted_auc['triplet'] = triplet_weighted_auc
+                best_models['triplet'] = triplet_model
+                model_path = 'Trained Models/Best Triplet Model/'
+                triplet_model.save_pretrained(model_path)
+                tokenizer.save_pretrained(model_path)
+
 
             # # ==========Adversial Non Hate Training ==========
             
@@ -2209,23 +2611,86 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             # Tracking variables
             adversial_non_hate_tr_loss = 0
             adversial_non_hate_nb_tr_examples, adversial_non_hate_nb_tr_steps = 0, 0
+            adversial_y_true, adversial_y_pred = [], []
+
+            # for step, batch in enumerate(adversial_non_hate_validation_dataloader):
+            #     batch = tuple(t.to(device) for t in batch)
+            #     b_input_ids, b_input_mask, b_labels = batch
+            #     adversial_non_hate_optimizer.zero_grad()
+            #     # # Forward pass
+            #     # adversial_train_output = adversial_non_hate_model(b_input_ids, 
+            #     #                     token_type_ids = None, 
+            #     #                     attention_mask = b_input_mask, 
+            #     #                     labels = b_labels)
+                
+            #     adversial_train_output = adversial_non_hate_model(b_input_ids, attention_mask = b_input_mask,labels = b_labels)
+
+            #     # Calculate loss and update tracking variables
+            #     adversial_tr_loss = adversial_train_output.loss
+            #     adversial_non_hate_tr_loss += adversial_tr_loss.item()
+            #     adversial_non_hate_nb_tr_examples += b_input_ids.size(0)
+            #     adversial_non_hate_nb_tr_steps += 1
+                
+            #     # Calculate predicted probabilities and true labels for ROC AUC
+            #     logits = adversial_train_output.logits
+            #     probs = torch.softmax(logits, dim=-1)
+            #     preds = probs[:, 1]
+            #     adversial_y_true.extend(b_labels.cpu().detach().numpy())
+            #     adversial_y_pred.extend(preds.cpu().detach().numpy())
+                
+            #     # Backward pass and optimization step
+            #     adversial_train_output.loss.backward()
+            #     adversial_non_hate_optimizer.step()
+
+            # # Calculate weighted ROC AUC
+            # adversarial_non_hate_weighted_auc = roc_auc_score(adversial_y_true, adversial_y_pred, average='weighted')
+
+            # if adversarial_non_hate_weighted_auc > best_weighted_auc['non_hate']:
+            #     best_weighted_auc['non_hate'] = adversarial_non_hate_weighted_auc
+            #     best_models['non_hate'] = adversial_non_hate_model
+            #     model_path = 'Trained Models/Best T2 Non-Hate Model/'
+            #     adversial_non_hate_model.save_pretrained(model_path)
+            #     adversial_non_hate_tokenizer.save_pretrained(model_path)
 
             for step, batch in enumerate(adversial_non_hate_validation_dataloader):
                 batch = tuple(t.to(device) for t in batch)
                 b_input_ids, b_input_mask, b_labels = batch
                 adversial_non_hate_optimizer.zero_grad()
+
+                # Convert b_labels to one-hot encoded tensor
+                b_labels = F.one_hot(b_labels, num_classes=2).float()
+
                 # Forward pass
-                adversial_train_output = adversial_non_hate_model(b_input_ids, 
-                                    token_type_ids = None, 
-                                    attention_mask = b_input_mask, 
-                                    labels = b_labels)
-                # Backward pass
-                adversial_train_output.loss.backward()
-                adversial_non_hate_optimizer.step()
-                # Update tracking variables
-                adversial_non_hate_tr_loss += adversial_train_output.loss.item()
+                adversial_train_output = adversial_non_hate_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+
+                # Calculate loss and update tracking variables
+                # adversial_tr_loss = loss_fn(adversial_train_output.logits, b_labels)
+                adversial_tr_loss = loss_fn1(adversial_train_output.logits, b_labels)
+                adversial_non_hate_tr_loss += adversial_tr_loss.item()
                 adversial_non_hate_nb_tr_examples += b_input_ids.size(0)
                 adversial_non_hate_nb_tr_steps += 1
+
+                # Calculate predicted probabilities and true labels for ROC AUC
+                probs = torch.softmax(adversial_train_output.logits, dim=-1)
+                preds = probs[:, 1]
+                adversial_y_true.extend(b_labels.cpu().detach().numpy()[:, 1])
+                adversial_y_pred.extend(preds.cpu().detach().numpy())
+
+                # Backward pass and optimization step
+                adversial_tr_loss.backward()
+                adversial_non_hate_optimizer.step()
+
+            # Calculate weighted ROC AUC
+            adversial_y_true = np.array(adversial_y_true)
+            adversial_y_pred = np.array(adversial_y_pred)
+            adversarial_non_hate_weighted_auc = roc_auc_score(adversial_y_true, adversial_y_pred, average='weighted')
+
+            if adversarial_non_hate_weighted_auc > best_weighted_auc['non_hate']:
+                best_weighted_auc['non_hate'] = adversarial_non_hate_weighted_auc
+                best_models['non_hate'] = adversial_non_hate_model
+                model_path = 'Trained Models/Best T2 Non-Hate Model/'
+                adversial_non_hate_model.save_pretrained(model_path)
+                adversial_non_hate_tokenizer.save_pretrained(model_path)
 
             # # ==========Adversial Select Training ==========
             
@@ -2235,23 +2700,99 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             # Tracking variables
             adversial_select_tr_loss = 0
             adversial_select_nb_tr_examples, adversial_select_nb_tr_steps = 0, 0
+            adversial_select_y_true, adversial_select_y_pred = [], []
+
+            # for step, batch in enumerate(adversial_select_validation_dataloader):
+
+            #     batch = tuple(t.to(device) for t in batch)
+            #     b_input_ids, b_input_mask, b_labels = batch
+            #     adversial_select_optimizer.zero_grad()
+
+            #     # # Forward pass
+            #     # adversial_train_output = adversial_select_model(b_input_ids, 
+            #     #                     token_type_ids = None, 
+            #     #                     attention_mask = b_input_mask, 
+            #     #                     labels = b_labels)
+                
+            #     # Forward pass
+            #     adversial_train_output = adversial_select_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+                
+            #     # Calculate loss and update tracking variables
+            #     adversial_tr_loss = adversial_train_output.loss
+            #     adversial_select_tr_loss += adversial_tr_loss.item()
+            #     adversial_select_nb_tr_examples += b_input_ids.size(0)
+            #     adversial_select_nb_tr_steps += 1
+                
+            #     # Calculate predicted probabilities and true labels for ROC AUC
+            #     logits = adversial_train_output.logits
+            #     probs = torch.softmax(logits, dim=-1)
+            #     preds = probs[:, 1]
+            #     adversial_select_y_true.extend(b_labels.cpu().detach().numpy())
+            #     adversial_select_y_pred.extend(preds.cpu().detach().numpy())
+
+            #     # Backward pass and optimization step
+            #     adversial_train_output.loss.backward()
+            #     adversial_select_optimizer.step()
+
+            # Calculate weighted ROC AUC
+            # adversial_select_y_true = np.array(adversial_select_y_true)
+            # adversial_select_y_pred = np.array(adversial_select_y_pred)
+            # adversarial_select_weighted_auc = roc_auc_score(adversial_select_y_true[:, 1], adversial_select_y_pred, average='weighted')
+
+
+            # Save the trained models and the tokenizers
+            # model_path = 'Trained Models/'
+            # model.save_pretrained(model_path)
+            # adversial_non_hate_model.save_pretrained(model_path)
+            # adversial_select_model.save_pretrained(model_path)
+            # tokenizer.save_pretrained(model_path)
+            # adversial_non_hate_tokenizer.save_pretrained(model_path)
+            # adversial_select_tokenizer.save_pretrained(model_path)
 
             for step, batch in enumerate(adversial_select_validation_dataloader):
                 batch = tuple(t.to(device) for t in batch)
                 b_input_ids, b_input_mask, b_labels = batch
                 adversial_select_optimizer.zero_grad()
+
+                # Convert b_labels to one-hot encoded tensor
+                b_labels = F.one_hot(b_labels, num_classes=2).float()
+
                 # Forward pass
-                adversial_train_output = adversial_select_model(b_input_ids, 
-                                    token_type_ids = None, 
-                                    attention_mask = b_input_mask, 
-                                    labels = b_labels)
-                # Backward pass
-                adversial_train_output.loss.backward()
-                adversial_select_optimizer.step()
-                # Update tracking variables
-                adversial_select_tr_loss += adversial_train_output.loss.item()
+                adversial_train_output = adversial_select_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+
+                # Calculate loss and update tracking variables
+                # adversial_tr_loss = loss_fn(adversial_train_output.logits, b_labels)
+                adversial_tr_loss = loss_fn1(adversial_train_output.logits, b_labels)
+                adversial_select_tr_loss += adversial_tr_loss.item()
                 adversial_select_nb_tr_examples += b_input_ids.size(0)
                 adversial_select_nb_tr_steps += 1
+
+                # Calculate predicted probabilities and true labels for ROC AUC
+                probs = torch.softmax(adversial_train_output.logits, dim=-1)
+                preds = probs[:, 1]
+                adversial_select_y_true.extend(b_labels.cpu().detach().numpy()[:, 1])
+                adversial_select_y_pred.extend(preds.cpu().detach().numpy())
+
+                # Backward pass and optimization step
+                adversial_tr_loss.backward()
+                adversial_select_optimizer.step()
+
+            # Calculate weighted ROC AUC
+            adversial_select_y_true = np.array(adversial_select_y_true)
+            adversial_select_y_pred = np.array(adversial_select_y_pred)
+            adversarial_select_weighted_auc = roc_auc_score(adversial_select_y_true, adversial_select_y_pred, average='weighted')
+
+            if adversarial_select_weighted_auc > best_weighted_auc['select']:
+                best_weighted_auc['select'] = adversarial_select_weighted_auc
+                best_models['select'] = adversial_select_model
+                model_path = 'Trained Models/Best T2 Adversarial Select Model/'
+                adversial_select_model.save_pretrained(model_path)
+                adversial_select_tokenizer.save_pretrained(model_path)
+
+            
+
+            print(f'Trained models and tokenizer are saved to {model_path}')
+                
 
             # ========== Validation (Original Test) ==========
 
@@ -2270,9 +2811,11 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 batch = tuple(t.to(device) for t in batch)
                 b_input_ids, b_input_mask, b_labels = batch
                 with torch.no_grad():
-                    # Forward pass
+                    # # Forward pass
+                    # eval_output = model(b_input_ids, 
+                    #                     token_type_ids = None, 
+                    #                     attention_mask = b_input_mask)
                     eval_output = model(b_input_ids, 
-                                        token_type_ids = None, 
                                         attention_mask = b_input_mask)
                 logits = eval_output.logits.detach().cpu().numpy()
                 label_ids = b_labels.to('cpu').numpy()
@@ -2289,6 +2832,43 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 if b_recall != 'nan': val_recall.append(b_recall)
                 # Update specificity only when (tn + fp) !=0; ignore nan
                 if b_specificity != 'nan': val_specificity.append(b_specificity)
+
+            # Set model to evaluation mode
+            triplet_model.eval()
+
+            # Tracking variables 
+            triplet_val_accuracy = []
+            triplet_val_precision = []
+            triplet_val_recall = []
+            triplet_val_specificity = []
+            triplet_all_labels = []
+            triplet_all_preds = []
+
+            for batch in validation_dataloader:
+                batch = tuple(t.to(device) for t in batch)
+                b_input_ids, b_input_mask, b_labels = batch
+                with torch.no_grad():
+                    # # Forward pass
+                    # eval_output = model(b_input_ids, 
+                    #                     token_type_ids = None, 
+                    #                     attention_mask = b_input_mask)
+                    triplet_eval_output = triplet_model(b_input_ids, 
+                                        attention_mask = b_input_mask)
+                triplet_logits = triplet_eval_output.logits.detach().cpu().numpy()
+                triplet_label_ids = b_labels.to('cpu').numpy()
+
+                triplet_all_labels.extend(triplet_label_ids.flatten().tolist())
+                triplet_all_preds.extend(np.round(np.argmax(triplet_logits, axis=1)).flatten().tolist())
+
+                # Calculate validation metrics
+                b_accuracy, b_precision, b_recall, b_specificity = b_metrics(triplet_logits, triplet_label_ids)
+                triplet_val_accuracy.append(b_accuracy)
+                # Update precision only when (tp + fp) !=0; ignore nan
+                if b_precision != 'nan': triplet_val_precision.append(b_precision)
+                # Update recall only when (tp + fn) !=0; ignore nan
+                if b_recall != 'nan': triplet_val_recall.append(b_recall)
+                # Update specificity only when (tn + fp) !=0; ignore nan
+                if b_specificity != 'nan': triplet_val_specificity.append(b_specificity)
                     
             # # Set model to evaluation mode
             # adversial_non_hate_model.eval()
@@ -2342,9 +2922,12 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 batch = tuple(t.to(device) for t in batch)
                 b_input_ids, b_input_mask, b_labels = batch
                 with torch.no_grad():
-                    # Forward pass
+                    # # Forward pass
+                    # eval_output = model(b_input_ids, 
+                    #                     token_type_ids = None, 
+                    #                     attention_mask = b_input_mask)
+                    
                     eval_output = model(b_input_ids, 
-                                        token_type_ids = None, 
                                         attention_mask = b_input_mask)
                 logits = eval_output.logits.detach().cpu().numpy()
                 label_ids = b_labels.to('cpu').numpy()
@@ -2361,6 +2944,44 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 if b_recall != 'nan': select_val_recall.append(b_recall)
                 # Update specificity only when (tn + fp) !=0; ignore nan
                 if b_specificity != 'nan': select_val_specificity.append(b_specificity)
+
+            # Set model to evaluation mode
+            triplet_model.eval()
+
+            # Tracking variables 
+            triplet_select_val_accuracy = []
+            triplet_select_val_precision = []
+            triplet_select_val_recall = []
+            triplet_select_val_specificity = []
+            triplet_select_all_labels = []
+            triplet_select_all_preds = []
+
+            for batch in select_validation_dataloader:
+                batch = tuple(t.to(device) for t in batch)
+                b_input_ids, b_input_mask, b_labels = batch
+                with torch.no_grad():
+                    # # Forward pass
+                    # eval_output = model(b_input_ids, 
+                    #                     token_type_ids = None, 
+                    #                     attention_mask = b_input_mask)
+                    
+                    triplet_eval_output = triplet_model(b_input_ids, 
+                                        attention_mask = b_input_mask)
+                triplet_logits = triplet_eval_output.logits.detach().cpu().numpy()
+                triplet_label_ids = b_labels.to('cpu').numpy()
+
+                triplet_select_all_labels.extend(triplet_label_ids.flatten().tolist())
+                triplet_select_all_preds.extend(np.round(np.argmax(triplet_logits, axis=1)).flatten().tolist())
+
+                # Calculate validation metrics
+                b_accuracy, b_precision, b_recall, b_specificity = b_metrics(triplet_logits, triplet_label_ids)
+                triplet_select_val_accuracy.append(b_accuracy)
+                # Update precision only when (tp + fp) !=0; ignore nan
+                if b_precision != 'nan': triplet_select_val_precision.append(b_precision)
+                # Update recall only when (tp + fn) !=0; ignore nan
+                if b_recall != 'nan': triplet_select_val_recall.append(b_recall)
+                # Update specificity only when (tn + fp) !=0; ignore nan
+                if b_specificity != 'nan': triplet_select_val_specificity.append(b_specificity)
                     
             # Set model to evaluation mode
             adversial_select_model.eval()
@@ -2377,9 +2998,11 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 batch = tuple(t.to(device) for t in batch)
                 b_input_ids, b_input_mask, b_labels = batch
                 with torch.no_grad():
-                    # Forward pass
-                    eval_output = adversial_select_model(b_input_ids, 
-                                        token_type_ids = None, 
+                    # # Forward pass
+                    # eval_output = adversial_select_model(b_input_ids, 
+                    #                     token_type_ids = None, 
+                    #                     attention_mask = b_input_mask)
+                    eval_output = adversial_select_model(b_input_ids,
                                         attention_mask = b_input_mask)
                 logits = eval_output.logits.detach().cpu().numpy()
                 label_ids = b_labels.to('cpu').numpy()
@@ -2414,9 +3037,11 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 batch = tuple(t.to(device) for t in batch)
                 b_input_ids, b_input_mask, b_labels = batch
                 with torch.no_grad():
-                    # Forward pass
+                    # # Forward pass
+                    # eval_output = model(b_input_ids, 
+                    #                     token_type_ids = None, 
+                    #                     attention_mask = b_input_mask)
                     eval_output = model(b_input_ids, 
-                                        token_type_ids = None, 
                                         attention_mask = b_input_mask)
                 logits = eval_output.logits.detach().cpu().numpy()
                 label_ids = b_labels.to('cpu').numpy()
@@ -2433,6 +3058,43 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 if b_recall != 'nan': non_hate_val_recall.append(b_recall)
                 # Update specificity only when (tn + fp) !=0; ignore nan
                 if b_specificity != 'nan': non_hate_val_specificity.append(b_specificity)
+
+            # Set model to evaluation mode
+            triplet_model.eval()
+
+            # Tracking variables 
+            triplet_non_hate_val_accuracy = []
+            triplet_non_hate_val_precision = []
+            triplet_non_hate_val_recall = []
+            triplet_non_hate_val_specificity = []
+            triplet_non_hate_all_labels = []
+            triplet_non_hate_all_preds = []
+
+            for batch in non_hate_validation_dataloader:
+                batch = tuple(t.to(device) for t in batch)
+                b_input_ids, b_input_mask, b_labels = batch
+                with torch.no_grad():
+                    # # Forward pass
+                    # eval_output = model(b_input_ids, 
+                    #                     token_type_ids = None, 
+                    #                     attention_mask = b_input_mask)
+                    triplet_eval_output = triplet_model(b_input_ids, 
+                                        attention_mask = b_input_mask)
+                triplet_logits = triplet_eval_output.logits.detach().cpu().numpy()
+                triplet_label_ids = b_labels.to('cpu').numpy()
+
+                triplet_non_hate_all_labels.extend(triplet_label_ids.flatten().tolist())
+                triplet_non_hate_all_preds.extend(np.round(np.argmax(triplet_logits, axis=1)).flatten().tolist())
+
+                # Calculate validation metrics
+                b_accuracy, b_precision, b_recall, b_specificity = b_metrics(triplet_logits, triplet_label_ids)
+                triplet_non_hate_val_accuracy.append(b_accuracy)
+                # Update precision only when (tp + fp) !=0; ignore nan
+                if b_precision != 'nan': triplet_non_hate_val_precision.append(b_precision)
+                # Update recall only when (tp + fn) !=0; ignore nan
+                if b_recall != 'nan': triplet_non_hate_val_recall.append(b_recall)
+                # Update specificity only when (tn + fp) !=0; ignore nan
+                if b_specificity != 'nan': triplet_non_hate_val_specificity.append(b_specificity)
                     
             # Set model to evaluation mode
             adversial_non_hate_model.eval()
@@ -2449,9 +3111,11 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 batch = tuple(t.to(device) for t in batch)
                 b_input_ids, b_input_mask, b_labels = batch
                 with torch.no_grad():
-                    # Forward pass
+                    # # Forward pass
+                    # eval_output = adversial_non_hate_model(b_input_ids, 
+                    #                     token_type_ids = None, 
+                    #                     attention_mask = b_input_mask)
                     eval_output = adversial_non_hate_model(b_input_ids, 
-                                        token_type_ids = None, 
                                         attention_mask = b_input_mask)
                 logits = eval_output.logits.detach().cpu().numpy()
                 label_ids = b_labels.to('cpu').numpy()
@@ -2469,7 +3133,14 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 # Update specificity only when (tn + fp) !=0; ignore nan
                 if b_specificity != 'nan': adversial_non_hate_val_specificity.append(b_specificity)
 
+            print(f"Weighted ROC AUC: {weighted_auc:.4f}")
+            print(f"Weighted Adversarial Non Hate ROC AUC: {adversarial_non_hate_weighted_auc:.4f}")
+            print(f"Weighted Adversarial Select ROC AUC: {adversarial_select_weighted_auc:.4f}")
+            print(f"Weighted Triplet ROC AUC: {triplet_weighted_auc:.4f}")
+            
+
             print('\n\t - Train loss: {:.4f}'.format(tr_loss / nb_tr_steps))
+            print('\n\t - Triplet Train loss: {:.4f}'.format(triplet_tr_loss / triplet_nb_tr_steps))
             print('\n\t - Adversial Non Hate Train loss: {:.4f}'.format(adversial_non_hate_tr_loss / adversial_non_hate_nb_tr_steps))
             print('\n\t - Adversial Select Train loss: {:.4f}'.format(adversial_select_tr_loss / adversial_select_nb_tr_steps))
             
@@ -2478,6 +3149,11 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             print('\t - Validation Precision: {:.4f}'.format(sum(val_precision)/len(val_precision)) if len(val_precision)>0 else '\t - Validation Precision: NaN')
             print('\t - Validation Recall: {:.4f}'.format(sum(val_recall)/len(val_recall)) if len(val_recall)>0 else '\t - Validation Recall: NaN')
             print('\t - Validation Specificity: {:.4f}\n'.format(sum(val_specificity)/len(val_specificity)) if len(val_specificity)>0 else '\t - Validation Specificity: NaN')
+
+            print('\t - Triplet Validation Accuracy: {:.4f}'.format(sum(triplet_val_accuracy)/len(triplet_val_accuracy)))
+            print('\t - Triplet Validation Precision: {:.4f}'.format(sum(triplet_val_precision)/len(triplet_val_precision)) if len(triplet_val_precision)>0 else '\t - Triplet Validation Precision: NaN')
+            print('\t - Triplet Validation Recall: {:.4f}'.format(sum(triplet_val_recall)/len(triplet_val_recall)) if len(triplet_val_recall)>0 else '\t - Triplet Validation Recall: NaN')
+            print('\t - Triplet Validation Specificity: {:.4f}\n'.format(sum(triplet_val_specificity)/len(triplet_val_specificity)) if len(triplet_val_specificity)>0 else '\t - Triplet Validation Specificity: NaN')
             
             # print('\t - Adversial Validation Accuracy: {:.4f}'.format(sum(adversial_val_accuracy)/len(adversial_val_accuracy)))
             # print('\t - Adversial Validation Precision: {:.4f}'.format(sum(adversial_val_precision)/len(adversial_val_precision)) if len(adversial_val_precision)>0 else '\t - Adversial Validation Precision: NaN')
@@ -2509,6 +3185,9 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             print("Validation Classification Report :")
             print(classification_report(all_labels, all_preds))
 
+            print("Triplet Validation Classification Report :")
+            print(classification_report(triplet_all_labels, triplet_all_preds))
+
             print("Select Validation Classification Report :")
             print(classification_report(select_all_labels, select_all_preds))
 
@@ -2518,11 +3197,19 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             # print("Adversial Validation Classification Report :")
             # print(classification_report(adversial_all_labels, adversial_all_preds))
 
-            print(" Adversial Select Validation Classification Report :")
+            print("Adversial Select Validation Classification Report :")
             print(classification_report(adversial_select_all_labels, adversial_select_all_preds))
 
-            print(" Adversial Non Hate Validation Classification Report :")
+            print("Triplet Select Validation Classification Report :")
+            print(classification_report(triplet_select_all_labels, triplet_select_all_preds))
+
+            
+
+            print("Adversial Non Hate Validation Classification Report :")
             print(classification_report(adversial_non_hate_all_labels, adversial_non_hate_all_preds))
+
+            print("Triplet Non Hate Validation Classification Report :")
+            print(classification_report(triplet_non_hate_all_labels, triplet_non_hate_all_preds))
 
 
 
