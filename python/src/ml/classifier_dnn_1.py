@@ -54,6 +54,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import scale, StandardScaler
 from transformers import DistilBertTokenizer,DistilBertForSequenceClassification
 from sklearn.metrics import roc_auc_score
+from sklearn.preprocessing import label_binarize
 
 import torch
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
@@ -68,6 +69,7 @@ import numpy as np
 from tabulate import tabulate
 from tqdm import trange
 import random
+import logging
 
 
 from ml import util
@@ -106,6 +108,13 @@ class TripletLoss(nn.Module):
         self.margin = margin
 
     def forward(self, anchor, positive, negative):
+        # print(anchor.shape)
+        # print(positive.shape)
+        # print(negative.shape)
+
+        # positive_anchor = anchor.expand_as(positive)
+        # print(positive_anchor.shape)
+
         # Calculate the distance between anchor and positive examples
         pos_dist = nn.functional.pairwise_distance(anchor, positive, 2)
 
@@ -116,6 +125,39 @@ class TripletLoss(nn.Module):
         loss = nn.functional.relu(pos_dist - neg_dist + self.margin)
 
         return loss.mean()
+
+# class TripletLoss(nn.Module):
+#     def __init__(self, margin=1.0):
+#         super(TripletLoss, self).__init__()
+#         self.margin = margin
+
+#     def forward(self, anchor, positive, negative):
+#         # Calculate the minimum dimension
+#         min_dim = min(anchor.shape[0], positive.shape[0], negative.shape[0])
+
+#         # Slice tensors to match dimensions
+#         anchor_sliced = anchor[:min_dim]
+#         positive_sliced = positive[:min_dim]
+#         negative_sliced = negative[:min_dim]
+
+#         # Create mask with the same shape as the sliced input tensors
+#         valid_pairs = (anchor_sliced != 0).any(dim=2) & (negative_sliced != 0).any(dim=2)
+
+#         # Calculate the distance between anchor and positive examples
+#         pos_dist = nn.functional.pairwise_distance(anchor_sliced, positive_sliced, 2)
+
+#         # Calculate the distance between anchor and negative examples
+#         neg_dist = nn.functional.pairwise_distance(anchor_sliced, negative_sliced, 2)
+
+#         # Apply mask to the distances
+#         valid_pos_dist = pos_dist[valid_pairs]
+#         valid_neg_dist = neg_dist[valid_pairs]
+
+#         # Calculate the triplet loss
+#         loss = nn.functional.relu(valid_pos_dist - valid_neg_dist + self.margin)
+
+#         return loss.mean()
+
 
 
 def get_word_vocab(tweets, out_folder, normalize_option):
@@ -969,6 +1011,11 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                randomize_strategy,
                pretrained_embedding_models=None, expected_embedding_dim=None,
                word_dist_features_file=None, use_mixed_data=False):
+    
+    # Set up logging configuration
+    logging.basicConfig(filename='model_log_file.txt', filemode='w', level=logging.INFO)
+    logging.info('Running Hate Speech Dataset')
+
 
     data_set_name = "hate_speech"
     # data_set_name = "racism_and_sexism"
@@ -1850,9 +1897,11 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
         text = tweet_without_stopwords.values
         labels = raw_data['class'].values
 
-        val_ratio = 0.25
+        # val_ratio = 0.25
+        #change this to 80 10 10
+
         # Recommended batch size: 16, 32. See: https://arxiv.org/pdf/1810.04805.pdf
-        batch_size = 16
+        batch_size = 256
 
         # Indices of the train and validation splits stratified by labels
         # train_idx, val_idx = train_test_split(
@@ -1861,24 +1910,50 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
         #     shuffle = True,
         #     stratify = labels,
         #     random_state = 42)
-        train_idx, val_idx = train_test_split(
-            np.arange(len(labels)),
-            test_size = val_ratio,
-            shuffle = True,
-            stratify = labels)
+        # train_idx, val_idx = train_test_split(
+        #     np.arange(len(labels)),
+        #     test_size = val_ratio,
+        #     shuffle = True,
+        #     stratify = labels)
 
+        # Split the data into training and the rest (test+validation) with a ratio of 80:20
+        train_idx, rest_idx = train_test_split(
+            np.arange(len(labels)),
+            test_size = 0.2,
+            shuffle = True,
+            stratify = labels,
+            random_state = 42)
+        
+        # Split the rest into test and validation sets with a ratio of 50:50
+        val_idx, test_idx = train_test_split(
+            rest_idx,
+            test_size = 0.5,
+            shuffle = True,
+            stratify = labels[rest_idx],
+            random_state = 42)
+        
         training_data = raw_data.loc[train_idx,]
-        testing_data = raw_data.loc[val_idx,]
+        validation_data = raw_data.loc[val_idx,]
+        testing_data = raw_data.loc[test_idx,]
+
+        # training_data = raw_data.loc[train_idx,]
+        # testing_data = raw_data.loc[val_idx,]
+        
+        ##create the valudation data
 
         training_data.reset_index(inplace=True,drop=True)
+        validation_data.reset_index(inplace=True,drop=True)
         testing_data.reset_index(inplace=True,drop=True)
         
         
 
         training_data["tweet_select_attack"] = ""
         training_data["tweet_non_hate_attack"] = ""
+        validation_data["tweet_select_attack"] = ""
+        validation_data["tweet_non_hate_attack"] = ""
         testing_data["tweet_select_attack"] = ""
         testing_data["tweet_non_hate_attack"] = ""
+        
 
         tokenizer = DistilBertTokenizer.from_pretrained(
             'distilbert-base-uncased',
@@ -1915,6 +1990,10 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             training_data.loc[i,"tweet_select_attack"] = training_data.loc[i,"tweet_without_stopwords"] +" "+ " ".join(random.choices(filtered_sentence, k=50))
             training_data.loc[i,"tweet_non_hate_attack"] = training_data.loc[i,"tweet_without_stopwords"] +" "+ " ".join(random.choices(non_hate_words_set, k=50))
 
+        for i in range(0,len(validation_data)):
+            validation_data.loc[i,"tweet_select_attack"] = validation_data.loc[i,"tweet_without_stopwords"] +" "+ " ".join(random.choices(filtered_sentence, k=50))
+            validation_data.loc[i,"tweet_non_hate_attack"] = validation_data.loc[i,"tweet_without_stopwords"] +" "+ " ".join(random.choices(non_hate_words_set, k=50))
+
         for i in range(0,len(testing_data)):
         #     testing_data.loc[i,"tweet_select_attack"] = testing_data.loc[i,"tweet"] +" "+ " ".join(rn.sample(filtered_sentence, 10))
             testing_data.loc[i,"tweet_select_attack"] = testing_data.loc[i,"tweet_without_stopwords"] +" "+ " ".join(random.choices(filtered_sentence, k=50))
@@ -1924,6 +2003,11 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
         print(training_data.loc[0,"tweet_without_stopwords"])
         print(training_data.loc[0,"tweet_select_attack"])
         print(training_data.loc[0,"tweet_non_hate_attack"])
+
+        print("Testing Appending : ")
+        print(validation_data.loc[0,"tweet_without_stopwords"])
+        print(validation_data.loc[0,"tweet_select_attack"])
+        print(validation_data.loc[0,"tweet_non_hate_attack"])
 
         print("Testing Appending : ")
         print(testing_data.loc[0,"tweet_without_stopwords"])
@@ -1947,7 +2031,8 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
         print(len(combined_select_text))
 
         training_data.set_index(train_idx, inplace=True)
-        testing_data.set_index(val_idx, inplace=True)
+        validation_data.set_index(val_idx, inplace=True)
+        testing_data.set_index(test_idx, inplace=True)
 
         def print_rand_sentence():
             '''Displays the tokens and respective IDs of a random text sample'''
@@ -1963,8 +2048,14 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
         token_id = []
         attention_masks = []
 
+        val_select_token_id = []
+        val_select_attention_masks = []
+
         select_token_id = []
         select_attention_masks = []
+
+        val_non_hate_token_id = []
+        val_non_hate_attention_masks = []
 
         non_hate_token_id = []
         non_hate_attention_masks = []
@@ -2002,6 +2093,19 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
         attention_masks = torch.cat(attention_masks, dim = 0)
         labels = torch.tensor(labels)
 
+        val_select_text = validation_data['tweet_select_attack'].values
+        val_select_labels = validation_data['class'].values
+
+        for sample in val_select_text:
+            val_select_encoding_dict = preprocessing(sample, tokenizer)
+            val_select_token_id.append(val_select_encoding_dict['input_ids']) 
+            val_select_attention_masks.append(val_select_encoding_dict['attention_mask'])
+
+
+        val_select_token_id = torch.cat(val_select_token_id, dim = 0)
+        val_select_attention_masks = torch.cat(val_select_attention_masks, dim = 0)
+        val_select_labels = torch.tensor(val_select_labels)
+
         select_text = testing_data['tweet_select_attack'].values
         select_labels = testing_data['class'].values
 
@@ -2014,6 +2118,20 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
         select_token_id = torch.cat(select_token_id, dim = 0)
         select_attention_masks = torch.cat(select_attention_masks, dim = 0)
         select_labels = torch.tensor(select_labels)
+
+
+        val_non_hate_text = validation_data['tweet_non_hate_attack'].values
+        val_non_hate_labels = validation_data['class'].values
+
+        for sample in val_non_hate_text:
+            val_non_hate_encoding_dict = preprocessing(sample, tokenizer)
+            val_non_hate_token_id.append(val_non_hate_encoding_dict['input_ids']) 
+            val_non_hate_attention_masks.append(val_non_hate_encoding_dict['attention_mask'])
+
+
+        val_non_hate_token_id = torch.cat(val_non_hate_token_id, dim = 0)
+        val_non_hate_attention_masks = torch.cat(val_non_hate_attention_masks, dim = 0)
+        val_non_hate_labels = torch.tensor(val_non_hate_labels)
 
         non_hate_text = testing_data['tweet_non_hate_attack'].values
         non_hate_labels = testing_data['class'].values
@@ -2092,9 +2210,21 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                                 attention_masks[val_idx], 
                                 labels[val_idx])
 
+        test_set = TensorDataset(token_id[test_idx], 
+                                attention_masks[test_idx], 
+                                labels[test_idx])
+
+        val_select_set = TensorDataset(val_select_token_id, 
+                        val_select_attention_masks, 
+                        val_select_labels)
+        
         select_set = TensorDataset(select_token_id, 
                         select_attention_masks, 
                         select_labels)
+        
+        val_non_hate_set = TensorDataset(val_non_hate_token_id, 
+                        val_non_hate_attention_masks, 
+                        val_non_hate_labels)
 
         non_hate_set = TensorDataset(non_hate_token_id, 
                         non_hate_attention_masks, 
@@ -2114,32 +2244,57 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                     sampler = RandomSampler(train_set),
                     batch_size = batch_size
                 )
+        
+        triplet_train_dataloader = DataLoader(
+                    train_set,
+                    sampler = RandomSampler(train_set),
+                    batch_size = batch_size
+                )
 
         validation_dataloader = DataLoader(
                     val_set,
                     sampler = SequentialSampler(val_set),
                     batch_size = batch_size
                 )
+        
+        # ========= test_dataloader should be used instead of validation_dataloader in further
+        test_dataloader = DataLoader(
+                    test_set,
+                    sampler = SequentialSampler(test_set),
+                    batch_size = batch_size
+                )
 
         select_validation_dataloader = DataLoader(
+                    val_select_set,
+                    sampler = SequentialSampler(val_select_set),
+                    batch_size = batch_size
+                )
+        # ========= select_test_dataloader should be used instead of select_validation_dataloader in further
+        select_test_dataloader = DataLoader(
                     select_set,
                     sampler = SequentialSampler(select_set),
                     batch_size = batch_size
                 )
-
+        
         non_hate_validation_dataloader = DataLoader(
+                    val_non_hate_set,
+                    sampler = SequentialSampler(val_non_hate_set),
+                    batch_size = batch_size
+                )
+        # ========= non_hate_test_dataloader should be used instead of non_hate_validation_dataloader in further
+        non_hate_test_dataloader = DataLoader(
                     non_hate_set,
                     sampler = SequentialSampler(non_hate_set),
                     batch_size = batch_size
                 )
 
-        adversial_non_hate_validation_dataloader = DataLoader(
+        adversial_non_hate_train_dataloader = DataLoader(
                     adversial_non_hate_set,
                     sampler = SequentialSampler(adversial_non_hate_set),
                     batch_size = batch_size
                 )
         
-        adversial_select_validation_dataloader = DataLoader(
+        adversial_select_train_dataloader = DataLoader(
                     adversial_select_set,
                     sampler = SequentialSampler(adversial_select_set),
                     batch_size = batch_size
@@ -2296,7 +2451,7 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
         # adversial_select_optimizer = torch.optim.AdamW(adversial_select_model.parameters(),lr = 5e-5,eps = 1e-08).to(device)
 
         # Recommended number of epochs: 2, 3, 4. See: https://arxiv.org/pdf/1810.04805.pdf
-        epochs = 10
+        epochs = 4
 
         # Define variables to keep track of the best performance of each model
         best_weighted_auc = {'model': 0, 'non_hate': 0, 'select': 0,'triplet':0}
@@ -2314,32 +2469,6 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             
             # Set model to training mode
             model.train()
-            
-            # # Tracking variables
-            # tr_loss = 0
-            # nb_tr_examples, nb_tr_steps = 0, 0
-
-            # for step, batch in enumerate(train_dataloader):
-            #     batch = tuple(t.to(device) for t in batch)
-            #     b_input_ids, b_input_mask, b_labels = batch
-            #     optimizer.zero_grad()
-            #     # # Forward pass - Bert
-            #     # train_output = model(b_input_ids, 
-            #     #                     token_type_ids = None, 
-            #     #                     attention_mask = b_input_mask, 
-            #     #                     labels = b_labels)
-                
-            #     # Forward pass - DistilBert
-            #     train_output = model(b_input_ids, 
-            #                         attention_mask = b_input_mask, 
-            #                         labels = b_labels)
-            #     # Backward pass
-            #     train_output.loss.backward()
-            #     optimizer.step()
-            #     # Update tracking variables
-            #     tr_loss += train_output.loss.item()
-            #     nb_tr_examples += b_input_ids.size(0)
-            #     nb_tr_steps += 1
 
 
             # Tracking variables
@@ -2347,45 +2476,10 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             nb_tr_examples, nb_tr_steps = 0, 0
             y_true, y_pred = [], []
 
-
-            # for step, batch in enumerate(train_dataloader):
-            #     batch = tuple(t.to(device) for t in batch)
-            #     b_input_ids, b_input_mask, b_labels = batch
-            #     optimizer.zero_grad()
-                
-            #     # Forward pass
-            #     train_output = model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
-                
-                
-            #     # Calculate loss and update tracking variables
-            #     train_loss = train_output.loss
-            #     tr_loss += train_loss.item()
-            #     nb_tr_examples += b_input_ids.size(0)
-            #     nb_tr_steps += 1
-                
-            #     # Calculate predicted probabilities and true labels for ROC AUC
-            #     logits = train_output.logits
-            #     probs = torch.softmax(logits, dim=-1)
-            #     preds = probs[:, 1]
-            #     y_true.extend(b_labels.cpu().detach().numpy())
-            #     y_pred.extend(preds.cpu().detach().numpy())
-                
-            #     # Backward pass and optimization step
-            #     train_output.loss.backward()
-            #     optimizer.step()
-
-            # # Calculate weighted ROC AUC
-            # weighted_auc = roc_auc_score(y_true, y_pred, average='weighted')
-
-            # # Update best performance and save best models
-            # if weighted_auc > best_weighted_auc['model']:
-            #     best_weighted_auc['model'] = weighted_auc
-            #     best_models['model'] = model
-            #     model_path = 'Trained Models/Best T2 Model/'
-            #     model.save_pretrained(model_path)
-            #     tokenizer.save_pretrained(model_path)
-
+            logging.info('Batch:')
             for step, batch in enumerate(train_dataloader):
+                print(str(step + 1))
+                logging.info(str(step + 1))
                 batch = tuple(t.to(device) for t in batch)
                 b_input_ids, b_input_mask, b_labels = batch
                 optimizer.zero_grad()
@@ -2397,9 +2491,6 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
 
                 # Forward pass
                 train_output = model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
-
-                # attentions = train_output.attentions
-
 
                 # Calculate loss and update tracking variables
                 train_loss = loss_fn1(train_output.logits, b_labels)
@@ -2417,12 +2508,16 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 train_loss.backward()
                 optimizer.step()
 
-            # print(y_true.head())
-            # print(y_pred.head())
             # Calculate weighted ROC AUC
             y_true = np.array(y_true)
             y_pred = np.array(y_pred)
             weighted_auc = roc_auc_score(y_true[:, 1], y_pred, average='weighted')
+
+            print(f"Weighted ROC AUC: {weighted_auc:.4f}")
+            logging.info(f"Weighted ROC AUC: {weighted_auc:.4f}")
+
+            print('\n\t - Train loss: {:.4f}'.format(tr_loss / nb_tr_steps))
+            logging.info('\n\t - Train loss: {:.4f}'.format(tr_loss / nb_tr_steps))
 
             # Update best performance and save best models
             if weighted_auc > best_weighted_auc['model']:
@@ -2432,10 +2527,27 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 model.save_pretrained(model_path)
                 tokenizer.save_pretrained(model_path)
 
+            # Calculate predicted labels for classification report
+            train_pred_labels = (y_pred > 0.5).astype(int)
+            train_true_labels = np.argmax(y_true, axis=1)
+
+            # Print classification report
+            classification_rep = classification_report(train_true_labels, train_pred_labels)
+            print("Classification Report - Original Model Train Data:")
+            print(classification_rep)
+            logging.info("Classification Report - Original Model Train Data:")
+            logging.info(classification_rep)
+
+            # ========== Validation data evaluation
+
             val_loss = 0.0
             nb_val_steps = 0
+            
             # Set the model to evaluation mode
             model.eval()
+
+            y_true = []
+            y_pred = []
 
             with torch.no_grad():
                 for step, batch in enumerate(validation_dataloader):
@@ -2452,155 +2564,319 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                     val_loss_step = loss_fn1(val_output.logits, b_labels)
                     val_loss += val_loss_step.item()
                     nb_val_steps += 1
+
+                    # Calculate predicted probabilities and true labels
+                    probs = torch.softmax(val_output.logits, dim=-1)
+                    preds = probs[:, 1]
+                    y_true.extend(b_labels.cpu().detach().numpy())
+                    y_pred.extend(preds.cpu().detach().numpy())
+
             # Calculate the average validation loss
             avg_val_loss = val_loss / nb_val_steps
 
-            print('\n\t - Validation loss: {:.4f}'.format(avg_val_loss))
+            # Convert true labels and predicted labels to numpy arrays
+            y_true = np.array(y_true)
+            y_pred = np.array(y_pred)
 
+            # Calculate classification report
+            classification_rep = classification_report(y_true[:, 1], np.round(y_pred), target_names=["class 0", "class 1"])
+
+            # Print validation loss and classification report
+            print('\n\t - Validation loss: {:.4f}'.format(avg_val_loss))
+            print("Classification Report: Original Model Validation data")
+            print(classification_rep)
+
+            logging.info('\n\t - Validation loss: {:.4f}'.format(avg_val_loss))
+            logging.info("Classification Report: Original Model Validation data")
+            logging.info(classification_rep)
+
+            # =================== Testing Data Evaluation
+
+            test_loss = 0.0
+            nb_test_steps = 0
+            
+            # Set the model to evaluation mode
+            model.eval()
+
+            y_true = []
+            y_pred = []
+
+            with torch.no_grad():
+                for step, batch in enumerate(test_dataloader):
+                    batch = tuple(t.to(device) for t in batch)
+                    b_input_ids, b_input_mask, b_labels = batch
+
+                    # Convert b_labels to one-hot encoded tensor
+                    b_labels = F.one_hot(b_labels, num_classes=2).float()
+
+                    # Forward pass
+                    val_output = model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+
+                    # Calculate loss and update tracking variables
+                    test_loss_step = loss_fn1(val_output.logits, b_labels)
+                    test_loss += test_loss_step.item()
+                    nb_test_steps += 1
+
+                    # Calculate predicted probabilities and true labels
+                    probs = torch.softmax(val_output.logits, dim=-1)
+                    preds = probs[:, 1]
+                    y_true.extend(b_labels.cpu().detach().numpy())
+                    y_pred.extend(preds.cpu().detach().numpy())
+
+            # Calculate the average validation loss
+            avg_test_loss = test_loss / nb_test_steps
+
+            # Convert true labels and predicted labels to numpy arrays
+            y_true = np.array(y_true)
+            y_pred = np.array(y_pred)
+
+            # Calculate classification report
+            classification_rep = classification_report(y_true[:, 1], np.round(y_pred), target_names=["class 0", "class 1"])
+
+            # Print Tesing loss and classification report
+            print('\n\t - Testing loss: {:.4f}'.format(avg_test_loss))
+            print("Classification Report: Original Model Testing data")
+            print(classification_rep)
+
+            logging.info('\n\t - Testing loss: {:.4f}'.format(avg_test_loss))
+            logging.info("Classification Report: Original Model Testing data")
+            logging.info(classification_rep)
+
+
+            # Set the model to evaluation mode
+            model.eval()
+
+            y_true = []
+            y_pred = []
+
+            test_loss = 0
+            nb_test_steps = 0
+
+            with torch.no_grad():
+                # for step, batch in enumerate(non_hate_validation_dataloader):
+                for step, batch in enumerate(non_hate_test_dataloader):
+                    batch = tuple(t.to(device) for t in batch)
+                    b_input_ids, b_input_mask, b_labels = batch
+
+                    # Convert b_labels to one-hot encoded tensor
+                    b_labels_one_hot = F.one_hot(b_labels, num_classes=2).float()
+
+                    # Forward pass
+                    test_output = model(b_input_ids, attention_mask=b_input_mask, labels=b_labels_one_hot)
+
+                    # Calculate loss and update tracking variables
+                    test_loss_step = loss_fn1(test_output.logits, b_labels_one_hot)
+                    test_loss += test_loss_step.item()
+                    nb_test_steps += 1
+
+                    # Calculate predicted probabilities and true labels
+                    probs = torch.softmax(test_output.logits, dim=-1)
+                    preds = probs[:, 1]
+                    y_true.extend(b_labels.cpu().numpy())  # Use original b_labels here
+                    y_pred.extend(preds.cpu().detach().numpy())
+
+            # Calculate the average Test loss
+            avg_test_loss = test_loss / nb_test_steps
+
+            # Convert true labels and predicted labels to numpy arrays
+            y_true = np.array(y_true)
+            y_pred = np.array(y_pred)
+
+            # Calculate classification report
+            classification_rep = classification_report(y_true, np.round(y_pred), target_names=["class 0", "class 1"])
+
+            # Print Testing loss and classification report
+            print('\n\t - Non Hate Testing loss: {:.4f}'.format(avg_test_loss))
+            print("Classification Report: Original Model on Non Hate Testing data")
+            print(classification_rep)
+
+            logging.info('\n\t - Non Hate Testing loss: {:.4f}'.format(avg_test_loss))
+            logging.info("Classification Report: Original Model on Non Hate Testing data")
+            logging.info(classification_rep)
+
+            # Set the model to evaluation mode
+            model.eval()
+
+            y_true = []
+            y_pred = []
+
+            test_loss = 0
+            nb_test_steps = 0
+
+            with torch.no_grad():
+                # for step, batch in enumerate(select_validation_dataloader):
+                for step, batch in enumerate(select_test_dataloader):
+                    batch = tuple(t.to(device) for t in batch)
+                    b_input_ids, b_input_mask, b_labels = batch
+
+                    # Convert b_labels to one-hot encoded tensor
+                    b_labels_one_hot = F.one_hot(b_labels, num_classes=2).float()
+
+                    # Forward pass
+                    test_output = model(b_input_ids, attention_mask=b_input_mask, labels=b_labels_one_hot)
+
+                    # Calculate loss and update tracking variables
+                    test_loss_step = loss_fn1(test_output.logits, b_labels_one_hot)
+                    test_loss += test_loss_step.item()
+                    nb_test_steps += 1
+
+                    # Calculate predicted probabilities and true labels
+                    probs = torch.softmax(test_output.logits, dim=-1)
+                    preds = probs[:, 1]
+                    y_true.extend(b_labels.cpu().numpy())  # Use original b_labels here
+                    y_pred.extend(preds.cpu().detach().numpy())
+
+            # Calculate the average testing loss
+            avg_test_loss = test_loss / nb_test_steps
+
+            # Convert true labels and predicted labels to numpy arrays
+            y_true = np.array(y_true)
+            y_pred = np.array(y_pred)
+
+            # Calculate classification report
+            classification_rep = classification_report(y_true, np.round(y_pred), target_names=["class 0", "class 1"])
+
+            # Print Testing loss and classification report
+            print('\n\t - Select Testing loss: {:.4f}'.format(avg_test_loss))
+            print("Classification Report: Original Model on Select Testing data")
+            print(classification_rep)
+
+            logging.info('\n\t - Select Testing loss: {:.4f}'.format(avg_test_loss))
+            logging.info("Classification Report: Original Model on Select Testing data")
+            logging.info(classification_rep)
+
+        for _ in trange(epochs, desc = 'Epoch'):
 
             # ------------------------
             # Creating the Triplet Loss
 
-            # triplet_model.eval()
-            # # positive_ct = torch.zeros(len(token_id),100, device='cuda')
-            # positive_ct = torch.zeros(100, device='cuda')
+            # triplet_model = DistilBertForSequenceClassification.from_pretrained(
+            #     'distilbert-base-uncased',
+            #     num_labels=2,
+            #     output_attentions=True,
+            #     output_hidden_states=False,
+            # )
+
+            # # # triplet_model.eval()
+
+            # # positive_ct = torch.zeros(100, device='cuda')
             # negative_ct = torch.zeros(100, device='cuda')
-            # # token_pos_num = torch.zeros(len(token_id))
-            # pos_num = 0
+            # # pos_num = 0
             # neg_num = 0
 
-
-            # for step, eval_batch in enumerate(train_dataloader):
-            #     eval_batch = tuple(t.to(device) for t in eval_batch)
-            #     eval_b_input_ids, eval_b_input_mask, eval_b_labels = eval_batch
-            #     # optimizer.zero_grad()
-
-            #     # Forward pass
-            #     # train_output  = model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
-            #     with torch.no_grad():
-            #         # Forward pass
-            #         eval_train_output = triplet_model(eval_b_input_ids, attention_mask=eval_b_input_mask, labels=eval_b_labels)
-            #     attentions = eval_train_output.attentions[1]
-            #     attentions = attentions.mean(dim=(1, 2))
-            #     # after positive = attentions[b_labels==1]. befroe mean, look up for token id
-            #     positive = attentions[eval_b_labels==1].sum(dim=0)
-            #     negative = attentions[eval_b_labels==0].sum(dim=0)
-            #     positive_ct += positive
-            #     negative_ct += negative
-            #     pos_num += (eval_b_labels==1).sum().item()
-            #     neg_num += (eval_b_labels==0).sum().item()
-            # positive_ct = positive_ct/pos_num
-            # negative_ct = negative_ct/neg_num
-            # # positive_ct.size = (batch_size, len(token_id),100)
-                
-
-            # # ========== Training ==========
-            
-            # # Set model to training mode
-            # triplet_model.train()
-
-            # for step, batch in enumerate(train_dataloader):
+            # for step, batch in enumerate(triplet_train_dataloader):
             #     batch = tuple(t.to(device) for t in batch)
             #     b_input_ids, b_input_mask, b_labels = batch
-            #     optimizer.zero_grad()
-
-            #     # Convert b_labels to one-hot encoded tensor
-            #     b_labels = F.one_hot(b_labels, num_classes=2).float()
-
-            #     # Forward pass
-            #     train_output = triplet_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
-
-            #     attentions = train_output.attentions
-
-            #     layer_index = 1
-            #     anchor_out = attentions[layer_index].mean(dim=(1, 2))
-            #     positive_out = torch.where(b_labels==1, positive_ct, negative_ct)
-            #     negative_out = torch.where(b_labels==1, negative_ct, positive_ct)
-
-
-            #     # Calculate loss and update tracking variables
-            #     # train_loss = loss_fn1(train_output.logits, b_labels)
-            #     train_loss = loss_fn1(train_output.logits, b_labels)+loss_fn2(anchor_out, positive_out, negative_out)
-            #     tr_loss += train_loss.item()
-            #     nb_tr_examples += b_input_ids.size(0)
-            #     nb_tr_steps += 1
-
-            #     # Calculate predicted probabilities and true labels for ROC AUC
-            #     probs = torch.softmax(train_output.logits, dim=-1)
-            #     preds = probs[:, 1]
-            #     y_true.extend(b_labels.cpu().detach().numpy())
-            #     y_pred.extend(preds.cpu().detach().numpy())
-
-            #     # Backward pass and optimization step
-            #     train_loss.backward()
-            #     optimizer.step()
-
-            triplet_model.eval()
-            positive_ct = torch.zeros(100, device='cuda')
-            negative_ct = torch.zeros(100, device='cuda')
-            pos_num = 0
-            neg_num = 0
-
-            for step, batch in enumerate(train_dataloader):
-                batch = tuple(t.to(device) for t in batch)
-                b_input_ids, b_input_mask, b_labels = batch
-                # print(b_labels.shape)
-                with torch.no_grad():
-                    # Forward pass
-                    eval_train_output = triplet_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
-                attentions = eval_train_output.attentions[1]
-                attentions = attentions.mean(dim=(1, 2))
-                # after positive = attentions[b_labels==1]. before mean, look up for token id
-                positive = attentions[b_labels==1].sum(dim=0)
-                negative = attentions[b_labels==0].sum(dim=0)
-                positive_ct += positive
-                negative_ct += negative
-                pos_num += (b_labels==1).sum().item()
-                neg_num += (b_labels==0).sum().item()
-            positive_ct = positive_ct/pos_num
-            negative_ct = negative_ct/neg_num
+            #     # print(b_labels.shape)
+            #     with torch.no_grad():
+            #         # Forward pass
+            #         eval_train_output = triplet_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+            #     attentions = eval_train_output.attentions[1]
+            #     attentions = attentions.mean(dim=(1, 2))
+            #     # after positive = attentions[b_labels==1]. before mean, look up for token id
+            #     # positive = attentions[b_labels==1].sum(dim=0)
+            #     negative = attentions[b_labels==0].sum(dim=0)
+            #     # positive_ct += positive
+            #     negative_ct += negative
+            #     # pos_num += (b_labels==1).sum().item()
+            #     neg_num += (b_labels==0).sum().item()
+            # # positive_ct = positive_ct/pos_num
+            # negative_ct = negative_ct/neg_num
 
             # Set model to training mode
             triplet_model.train()
+            
 
             triplet_tr_loss = 0
+            triplet_tr_loss_ce = 0
+            triplet_tr_loss_triplet = 0
             triplet_nb_tr_examples, triplet_nb_tr_steps = 0, 0
             triplet_y_true, triplet_y_pred = [], []
-
+            logging.info('Batch :')
             for step, batch in enumerate(train_dataloader):
+                print(str(step + 1))
+                logging.info(str(step + 1))
+                # negative_ct = torch.zeros(100, device='cuda')
+                # neg_num = 0
+                
                 batch = tuple(t.to(device) for t in batch)
                 b_input_ids, b_input_mask, b_labels = batch
                 triplet_optimizer.zero_grad()
 
-                # print(b_labels.shape)
+                # for triplet_step, triplet_batch in enumerate(triplet_train_dataloader):
+                #     triplet_batch = tuple(t.to(device) for t in triplet_batch)
+                #     triplet_b_input_ids, triplet_b_input_mask, triplet_b_labels = triplet_batch
+                #     # print(b_labels.shape)
+                #     with torch.no_grad():
+                #         # Forward pass
+                #         triplet_eval_train_output = triplet_model(triplet_b_input_ids, attention_mask=triplet_b_input_mask, labels=triplet_b_labels)
+                #     triplet_attentions = triplet_eval_train_output.attentions[1]
+                #     triplet_attentions = triplet_attentions.mean(dim=(1, 2))
+                #     # after positive = attentions[b_labels==1]. before mean, look up for token id
+                #     # positive = attentions[b_labels==1].sum(dim=0)
+                #     triplet_negative = triplet_attentions[triplet_b_labels==0].sum(dim=0)
+                #     # positive_ct += positive
+                #     negative_ct += triplet_negative
+                #     # pos_num += (b_labels==1).sum().item()
+                #     neg_num += (triplet_b_labels==0).sum().item()
+                # # positive_ct = positive_ct/pos_num
+                # negative_ct = negative_ct/neg_num
 
                 # Forward pass
                 train_output = triplet_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
 
-                attentions = train_output.attentions
-                layer_index = 1
-                anchor_out = attentions[layer_index].mean(dim=(1, 2))
-                # positive_out = torch.where(b_labels==1, positive_ct, negative_ct)
-                # negative_out = torch.where(b_labels==1, negative_ct, positive_ct)
-                # repeat positive and negative tensors to match the batch size
-                # print(positive_ct)
-                positive_out = torch.where(b_labels==1, positive_ct.repeat(b_labels.size()[0], 1).T, negative_ct.repeat(b_labels.size()[0], 1).T).T
-                negative_out = torch.where(b_labels==1, negative_ct.repeat(b_labels.size()[0], 1).T, positive_ct.repeat(b_labels.size()[0], 1).T).T
+                # attentions = train_output.attentions[-1]
 
-                # positive_out = torch.where(b_labels==1, positive_ct.repeat(b_labels.size()[0], 1), negative_ct.repeat(b_labels.size()[0], 1))
-                # negative_out = torch.where(b_labels==1, negative_ct.repeat(b_labels.size()[0], 1), positive_ct.repeat(b_labels.size()[0], 1))
+                attentions = train_output.attentions[0]
 
-                # positive_out = torch.where(b_labels==1, positive_ct.unsqueeze(0).repeat(b_labels.size()[0], 1), negative_ct.unsqueeze(0).repeat(b_labels.size()[0], 1))
-                # negative_out = torch.where(b_labels==1, negative_ct.unsqueeze(0).repeat(b_labels.size()[0], 1), positive_ct.unsqueeze(0).repeat(b_labels.size()[0], 1))
+                ## also try mean and max
+                # attentions = attentions.mean(dim=(1, 2))
+                attentions = attentions.max(dim=(1, 2)).values
 
-                print(anchor_out.shape)
-                print(positive_out.shape)
-                print(negative_out.shape)
+                batch_size = b_labels.size()[0]
+
+                # Get attention for positive and negative instances
+                positive_attentions = attentions[b_labels == 0]
+                negative_attentions = attentions[b_labels == 1]
+
+                num_positive = positive_attentions.shape[0]
+                num_negative = negative_attentions.shape[0]
+
+                # this is always mean
+                negative_ct = negative_attentions.mean(dim=(0))
+
+                anchor_out = negative_ct.repeat(batch_size, 1).unsqueeze(1)  # Add singleton dimension
+
+                if num_positive > 0:
+                    positive_indices = torch.randint(0, num_positive, size=(batch_size,))
+                    positive_out = positive_attentions[positive_indices]
+                    # positive_out = positive_out.mean(dim=(1, 2))  # Take the mean attention across tokens and heads
+                    positive_out = positive_out.unsqueeze(1)  # Add singleton dimension
+                else:
+                    positive_out = torch.zeros_like(anchor_out)
+
+                if num_negative > 0:
+                    negative_indices = torch.randint(0, num_negative, size=(batch_size,))
+                    negative_out = negative_attentions[negative_indices]
+                    # negative_out = negative_out.mean(dim=(1, 2))  # Take the mean attention across tokens and heads
+                    negative_out = negative_out.unsqueeze(1)  # Add singleton dimension
+                else:
+                    negative_out = torch.zeros_like(anchor_out)
 
                 # Calculate loss and update tracking variables
-                train_loss = loss_fn1(train_output.logits, b_labels) + loss_fn2(anchor_out, positive_out, negative_out)
+                alpha = 1
+                cross_entropy_loss = loss_fn1(train_output.logits, b_labels)
+                triplet_loss = loss_fn2(anchor_out, positive_out, negative_out) if num_positive > 0 and num_negative > 0 else torch.tensor(0).to(device)
+                train_loss = cross_entropy_loss + alpha * triplet_loss
+
+                #can experiment of epoch 1,2 with bce and 3,4 with combined loss
+
+                train_loss_ce = cross_entropy_loss
+                train_loss_triplet = triplet_loss
+
                 triplet_tr_loss += train_loss.item()
-                # nb_tr_examples += b_input_ids.size(0)
+                triplet_tr_loss_ce += train_loss_ce.item()
+                triplet_tr_loss_triplet += train_loss_triplet.item()
                 triplet_nb_tr_steps += 1
 
                 # Calculate predicted probabilities and true labels for ROC AUC
@@ -2614,15 +2890,21 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 train_loss.backward()
                 triplet_optimizer.step()
 
-
-
-            # print(triplet_y_true.head())
-            # print(triplet_y_pred.head())
-            # Calculate weighted ROC AUC
             triplet_y_true = np.array(triplet_y_true)
             triplet_y_pred = np.array(triplet_y_pred)
             # weighted_auc = roc_auc_score(triplet_y_true[:, 1], triplet_y_pred, average='weighted')
             triplet_weighted_auc = roc_auc_score(triplet_y_true, triplet_y_pred, average='weighted')
+
+            print(f"Weighted Triplet ROC AUC: {triplet_weighted_auc:.4f}")
+            logging.info(f"Weighted Triplet ROC AUC: {triplet_weighted_auc:.4f}")
+
+
+            print('\n\t - Triplet Train loss with two function: {:.4f}'.format(triplet_tr_loss / triplet_nb_tr_steps))
+            logging.info('\n\t - Triplet Train loss with two function: {:.4f}'.format(triplet_tr_loss / triplet_nb_tr_steps))
+            print('\n\t - Triplet Train loss with fun_1: {:.4f}'.format(triplet_tr_loss_ce / triplet_nb_tr_steps))
+            logging.info('\n\t - Triplet Train loss with fun_1: {:.4f}'.format(triplet_tr_loss_ce / triplet_nb_tr_steps))
+            print('\n\t - Triplet Train loss with fun_2: {:.4f}'.format(triplet_tr_loss_triplet / triplet_nb_tr_steps))
+            logging.info('\n\t - Triplet Train loss with fun_2: {:.4f}'.format(triplet_tr_loss_triplet / triplet_nb_tr_steps))
 
             # Update best performance and save best models
             if triplet_weighted_auc > best_weighted_auc['triplet']:
@@ -2632,12 +2914,27 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 triplet_model.save_pretrained(model_path)
                 tokenizer.save_pretrained(model_path)
 
-            # Assuming you have a validation_dataloader already
+            # Calculate predicted labels for classification report
+            triplet_train_pred_labels = (triplet_y_pred > 0.5).astype(int)
+            triplet_train_true_labels = triplet_y_true
+
+            # Print classification report
+            classification_rep_triplet_train = classification_report(triplet_train_true_labels, triplet_train_pred_labels)
+            print("Classification Report - Triplet Train Data:")
+            print(classification_rep_triplet_train)
+
+            logging.info("Classification Report - Triplet Train Data:")
+            logging.info(classification_rep_triplet_train)
+
+
             triplet_val_loss = 0.0
-            nb_val_steps = 0
+            triplet_nb_val_steps = 0
 
             # Set the model to evaluation mode
             triplet_model.eval()
+
+            y_true = []
+            y_pred = []
 
             # Disable gradient calculations for validation
             with torch.no_grad():
@@ -2648,25 +2945,339 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                     # Forward pass
                     val_output = triplet_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
 
-                    # Calculate anchor_out using attention from the layer_index
-                    attentions = val_output.attentions
-                    layer_index = 1
-                    anchor_out = attentions[layer_index].mean(dim=(1, 2))
+                    # attentions = val_output.attentions[-1]
 
-                    # Calculate positive_out and negative_out as done in the training loop
-                    positive_out = torch.where(b_labels==1, positive_ct.repeat(b_labels.size()[0], 1).T, negative_ct.repeat(b_labels.size()[0], 1).T).T
-                    negative_out = torch.where(b_labels==1, negative_ct.repeat(b_labels.size()[0], 1).T, positive_ct.repeat(b_labels.size()[0], 1).T).T
+                    attentions = val_output.attentions[0]
+                    ## change to max if the above is changed to max
+                    # attentions = attentions.mean(dim=(1, 2))
+                    attentions = attentions.max(dim=(1, 2)).values
+
+                    batch_size = b_labels.size()[0]
+
+                    # Get attention for positive and negative instances
+                    positive_attentions = attentions[b_labels == 0]
+                    negative_attentions = attentions[b_labels == 1]
+
+                    num_positive = positive_attentions.shape[0]
+                    num_negative = negative_attentions.shape[0]
+
+                    negative_ct = negative_attentions.mean(dim=(0))
+
+                    anchor_out = negative_ct.repeat(batch_size, 1).unsqueeze(1)  # Add singleton dimension
+
+                    if num_positive > 0:
+                        positive_indices = torch.randint(0, num_positive, size=(batch_size,))
+                        positive_out = positive_attentions[positive_indices]
+                        # positive_out = positive_out.mean(dim=(1, 2))  # Take the mean attention across tokens and heads
+                        positive_out = positive_out.unsqueeze(1)  # Add singleton dimension
+                    else:
+                        positive_out = torch.zeros_like(anchor_out)
+
+                    if num_negative > 0:
+                        negative_indices = torch.randint(0, num_negative, size=(batch_size,))
+                        negative_out = negative_attentions[negative_indices]
+                        # negative_out = negative_out.mean(dim=(1, 2))  # Take the mean attention across tokens and heads
+                        negative_out = negative_out.unsqueeze(1)  # Add singleton dimension
+                    else:
+                        negative_out = torch.zeros_like(anchor_out)
 
                     # Calculate loss and update tracking variables
-                    val_loss_step = loss_fn1(val_output.logits, b_labels) + loss_fn2(anchor_out, positive_out, negative_out)
-                    triplet_val_loss += val_loss_step.item()
-                    nb_val_steps += 1
+                    alpha = 1
+                    cross_entropy_loss = loss_fn1(val_output.logits, b_labels)
+                    triplet_loss = loss_fn2(anchor_out, positive_out, negative_out) if num_positive > 0 and num_negative > 0 else 0
+                    triplet_test_loss = cross_entropy_loss + alpha * triplet_loss
+
+                    triplet_val_loss += triplet_test_loss.item()
+
+                    # Calculate predicted probabilities and true labels
+                    probs = torch.softmax(val_output.logits, dim=-1)
+                    preds = probs[:, 1]
+                    y_true.extend(b_labels.cpu().detach().numpy())
+                    y_pred.extend(preds.cpu().detach().numpy())
+
+                    triplet_nb_val_steps += 1
 
             # Calculate the average validation loss
-            avg_val_loss = triplet_val_loss / nb_val_steps
+            avg_triplet_val_loss = triplet_val_loss / triplet_nb_val_steps
 
-            print('\n\t - Triplet Validation loss: {:.4f}'.format(avg_val_loss))
+            # Convert true labels and predicted labels to numpy arrays
+            y_true = np.array(y_true)
+            y_pred = np.array(y_pred)
 
+            classification_rep = classification_report(y_true, np.round(y_pred), target_names=["class 0", "class 1"])
+
+            # Print validation loss and classification report
+            print('\n\t - Triplet Validation loss: {:.4f}'.format(avg_triplet_val_loss))
+            print("Triplet Classification Report on Validation Data :")
+            print(classification_rep)
+
+            logging.info('\n\t - Triplet Validation loss: {:.4f}'.format(avg_triplet_val_loss))
+            logging.info("Triplet Classification Report on Validation Data :")
+            logging.info(classification_rep)
+
+            # ====== Testing data
+
+
+            triplet_test_loss = 0.0
+            triplet_nb_test_steps = 0
+
+            # Set the model to evaluation mode
+            triplet_model.eval()
+
+            y_true = []
+            y_pred = []
+
+            # Disable gradient calculations for test
+            with torch.no_grad():
+                for step, batch in enumerate(test_dataloader):
+                    batch = tuple(t.to(device) for t in batch)
+                    b_input_ids, b_input_mask, b_labels = batch
+
+                    # Forward pass
+                    test_output = triplet_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+
+                    # attentions = test_output.attentions[-1]
+                    attentions = test_output.attentions[0]
+                    ## change to max if the above is changed to max
+                    # attentions = attentions.mean(dim=(1, 2))
+                    attentions = attentions.max(dim=(1, 2)).values
+                    batch_size = b_labels.size()[0]
+
+                    # Get attention for positive and negative instances
+                    positive_attentions = attentions[b_labels == 0]
+                    negative_attentions = attentions[b_labels == 1]
+
+                    num_positive = positive_attentions.shape[0]
+                    num_negative = negative_attentions.shape[0]
+
+                    negative_ct = negative_attentions.mean(dim=(0))
+
+                    anchor_out = negative_ct.repeat(batch_size, 1).unsqueeze(1)  # Add singleton dimension
+
+                    if num_positive > 0:
+                        positive_indices = torch.randint(0, num_positive, size=(batch_size,))
+                        positive_out = positive_attentions[positive_indices]
+                        # positive_out = positive_out.mean(dim=(1, 2))  # Take the mean attention across tokens and heads
+                        positive_out = positive_out.unsqueeze(1)  # Add singleton dimension
+                    else:
+                        positive_out = torch.zeros_like(anchor_out)
+
+                    if num_negative > 0:
+                        negative_indices = torch.randint(0, num_negative, size=(batch_size,))
+                        negative_out = negative_attentions[negative_indices]
+                        # negative_out = negative_out.mean(dim=(1, 2))  # Take the mean attention across tokens and heads
+                        negative_out = negative_out.unsqueeze(1)  # Add singleton dimension
+                    else:
+                        negative_out = torch.zeros_like(anchor_out)
+
+                    # Calculate loss and update tracking variables
+                    alpha = 1
+                    cross_entropy_loss = loss_fn1(test_output.logits, b_labels)
+                    triplet_loss = loss_fn2(anchor_out, positive_out, negative_out) if num_positive > 0 and num_negative > 0 else 0
+                    triplet_testing_loss = cross_entropy_loss + alpha * triplet_loss
+
+                    triplet_test_loss += triplet_testing_loss.item()
+
+                    # Calculate predicted probabilities and true labels
+                    probs = torch.softmax(test_output.logits, dim=-1)
+                    preds = probs[:, 1]
+                    y_true.extend(b_labels.cpu().detach().numpy())
+                    y_pred.extend(preds.cpu().detach().numpy())
+
+                    triplet_nb_test_steps += 1
+
+            # Calculate the average test loss
+            avg_triplet_test_loss = triplet_test_loss / triplet_nb_test_steps
+
+            # Convert true labels and predicted labels to numpy arrays
+            y_true = np.array(y_true)
+            y_pred = np.array(y_pred)
+
+            classification_rep = classification_report(y_true, np.round(y_pred), target_names=["class 0", "class 1"])
+
+            # Print Test loss and classification report
+            print('\n\t - Triplet Test loss: {:.4f}'.format(avg_triplet_test_loss))
+            print("Triplet Classification Report on Test Data :")
+            print(classification_rep)
+
+            logging.info('\n\t - Triplet Test loss: {:.4f}'.format(avg_triplet_test_loss))
+            logging.info("Triplet Classification Report on Test Data :")
+            logging.info(classification_rep)
+
+            # Set the model to evaluation mode
+            triplet_model.eval()
+
+            y_true = []
+            y_pred = []
+            triplet_val_loss = 0
+            triplet_nb_val_steps = 0
+
+            # Disable gradient calculations for validation
+            with torch.no_grad():
+                # for step, batch in enumerate(non_hate_validation_dataloader):
+                for step, batch in enumerate(non_hate_test_dataloader):
+                    batch = tuple(t.to(device) for t in batch)
+                    b_input_ids, b_input_mask, b_labels = batch
+
+                    # Forward pass
+                    val_output = triplet_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+
+                    # attentions = val_output.attentions[-1]
+
+                    attentions = val_output.attentions[0]
+                    ## change to max if the above is changed to max
+                    # attentions = attentions.mean(dim=(1, 2))
+                    attentions = attentions.max(dim=(1, 2)).values
+                    batch_size = b_labels.size()[0]
+
+                    # Get attention for positive and negative instances
+                    positive_attentions = attentions[b_labels == 0]
+                    negative_attentions = attentions[b_labels == 1]
+
+                    num_positive = positive_attentions.shape[0]
+                    num_negative = negative_attentions.shape[0]
+
+                    negative_ct = negative_attentions.mean(dim=(0))
+                    anchor_out = negative_ct.repeat(batch_size, 1).unsqueeze(1)  # Add singleton dimension
+
+                    if num_positive > 0:
+                        positive_indices = torch.randint(0, num_positive, size=(batch_size,))
+                        positive_out = positive_attentions[positive_indices]
+                        # positive_out = positive_out.mean(dim=(1, 2))  # Take the mean attention across tokens and heads
+                        positive_out = positive_out.unsqueeze(1)  # Add singleton dimension
+                    else:
+                        positive_out = torch.zeros_like(anchor_out)
+
+                    if num_negative > 0:
+                        negative_indices = torch.randint(0, num_negative, size=(batch_size,))
+                        negative_out = negative_attentions[negative_indices]
+                        # negative_out = negative_out.mean(dim=(1, 2))  # Take the mean attention across tokens and heads
+                        negative_out = negative_out.unsqueeze(1)  # Add singleton dimension
+                    else:
+                        negative_out = torch.zeros_like(anchor_out)
+
+                    # Calculate loss and update tracking variables
+                    alpha = 1
+                    cross_entropy_loss = loss_fn1(val_output.logits, b_labels)
+                    triplet_loss = loss_fn2(anchor_out, positive_out, negative_out) if num_positive > 0 and num_negative > 0 else 0
+                    triplet_test_loss = cross_entropy_loss + alpha * triplet_loss
+
+                    triplet_val_loss += triplet_test_loss.item()
+
+                    # Calculate predicted probabilities and true labels
+                    probs = torch.softmax(val_output.logits, dim=-1)
+                    preds = probs[:, 1]
+                    y_true.extend(b_labels.cpu().detach().numpy())
+                    y_pred.extend(preds.cpu().detach().numpy())
+
+                    triplet_nb_val_steps += 1
+
+            # Calculate the average validation loss
+            avg_triplet_val_loss = triplet_val_loss / triplet_nb_val_steps
+
+            # Convert true labels and predicted labels to numpy arrays
+            y_true = np.array(y_true)
+            y_pred = np.array(y_pred)
+
+            # Calculate classification report
+            classification_rep = classification_report(y_true, np.round(y_pred), target_names=["class 0", "class 1"])
+
+            # Print Test loss and classification report
+            print('\n\t - Triplet Test loss Non Hate Dataset: {:.4f}'.format(avg_triplet_val_loss))
+            print("Classification Report - Triplet Model on Non-Hate Test Data:")
+            print(classification_rep)
+
+            logging.info('\n\t - Triplet Test loss Non Hate Dataset: {:.4f}'.format(avg_triplet_val_loss))
+            logging.info("Classification Report - Triplet Model on Non-Hate Test Data:")
+            logging.info(classification_rep)
+
+
+            # Set the model to evaluation mode
+            triplet_model.eval()
+
+            y_true = []
+            y_pred = []
+            triplet_val_loss = 0
+            triplet_nb_val_steps = 0
+
+            # Disable gradient calculations for validation
+            with torch.no_grad():
+                # for step, batch in enumerate(select_validation_dataloader):
+                for step, batch in enumerate(select_test_dataloader):
+                    batch = tuple(t.to(device) for t in batch)
+                    b_input_ids, b_input_mask, b_labels = batch
+
+                    # Forward pass
+                    val_output = triplet_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+
+                    # attentions = val_output.attentions[-1]
+                    attentions = val_output.attentions[0]
+                    # attentions = attentions.mean(dim=(1, 2))
+                    attentions = attentions.max(dim=(1, 2)).values
+                    batch_size = b_labels.size()[0]
+
+                    # Get attention for positive and negative instances
+                    positive_attentions = attentions[b_labels == 0]
+                    negative_attentions = attentions[b_labels == 1]
+
+                    num_positive = positive_attentions.shape[0]
+                    num_negative = negative_attentions.shape[0]
+
+                    negative_ct = negative_attentions.mean(dim=(0))
+                    anchor_out = negative_ct.repeat(batch_size, 1).unsqueeze(1)  # Add singleton dimension
+
+                    if num_positive > 0:
+                        positive_indices = torch.randint(0, num_positive, size=(batch_size,))
+                        positive_out = positive_attentions[positive_indices]
+                        # positive_out = positive_out.mean(dim=(1, 2))  # Take the mean attention across tokens and heads
+                        positive_out = positive_out.unsqueeze(1)  # Add singleton dimension
+                    else:
+                        positive_out = torch.zeros_like(anchor_out)
+
+                    if num_negative > 0:
+                        negative_indices = torch.randint(0, num_negative, size=(batch_size,))
+                        negative_out = negative_attentions[negative_indices]
+                        # negative_out = negative_out.mean(dim=(1, 2))  # Take the mean attention across tokens and heads
+                        negative_out = negative_out.unsqueeze(1)  # Add singleton dimension
+                    else:
+                        negative_out = torch.zeros_like(anchor_out)
+
+                    # Calculate loss and update tracking variables
+                    alpha = 1
+                    cross_entropy_loss = loss_fn1(val_output.logits, b_labels)
+                    triplet_loss = loss_fn2(anchor_out, positive_out, negative_out) if num_positive > 0 and num_negative > 0 else 0
+                    triplet_test_loss = cross_entropy_loss + alpha * triplet_loss
+
+                    triplet_val_loss += triplet_test_loss.item()
+
+                    # Calculate predicted probabilities and true labels
+                    probs = torch.softmax(val_output.logits, dim=-1)
+                    preds = probs[:, 1]
+                    y_true.extend(b_labels.cpu().detach().numpy())
+                    y_pred.extend(preds.cpu().detach().numpy())
+
+                    triplet_nb_val_steps += 1
+
+            # Calculate the average Test loss
+            avg_triplet_val_loss = triplet_val_loss / triplet_nb_val_steps
+
+            # Convert true labels and predicted labels to numpy arrays
+            y_true = np.array(y_true)
+            y_pred = np.array(y_pred)
+
+            # Calculate classification report
+            classification_rep = classification_report(y_true, np.round(y_pred), target_names=["class 0", "class 1"])
+
+            # Print Test loss and classification report
+            print('\n\t - Triplet Test loss Select Dataset: {:.4f}'.format(avg_triplet_val_loss))
+            print("Classification Report - Triplet Model on Select Test Data:")
+            print(classification_rep)
+
+            logging.info('\n\t - Triplet Test loss Select Dataset: {:.4f}'.format(avg_triplet_val_loss))
+            logging.info("Classification Report - Triplet Model on Select Test Data:")
+            logging.info(classification_rep)
+
+        for _ in trange(epochs, desc = 'Epoch'):
 
             # # ==========Adversial Non Hate Training ==========
             
@@ -2678,46 +3289,7 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             adversial_non_hate_nb_tr_examples, adversial_non_hate_nb_tr_steps = 0, 0
             adversial_y_true, adversial_y_pred = [], []
 
-            # for step, batch in enumerate(adversial_non_hate_validation_dataloader):
-            #     batch = tuple(t.to(device) for t in batch)
-            #     b_input_ids, b_input_mask, b_labels = batch
-            #     adversial_non_hate_optimizer.zero_grad()
-            #     # # Forward pass
-            #     # adversial_train_output = adversial_non_hate_model(b_input_ids, 
-            #     #                     token_type_ids = None, 
-            #     #                     attention_mask = b_input_mask, 
-            #     #                     labels = b_labels)
-                
-            #     adversial_train_output = adversial_non_hate_model(b_input_ids, attention_mask = b_input_mask,labels = b_labels)
-
-            #     # Calculate loss and update tracking variables
-            #     adversial_tr_loss = adversial_train_output.loss
-            #     adversial_non_hate_tr_loss += adversial_tr_loss.item()
-            #     adversial_non_hate_nb_tr_examples += b_input_ids.size(0)
-            #     adversial_non_hate_nb_tr_steps += 1
-                
-            #     # Calculate predicted probabilities and true labels for ROC AUC
-            #     logits = adversial_train_output.logits
-            #     probs = torch.softmax(logits, dim=-1)
-            #     preds = probs[:, 1]
-            #     adversial_y_true.extend(b_labels.cpu().detach().numpy())
-            #     adversial_y_pred.extend(preds.cpu().detach().numpy())
-                
-            #     # Backward pass and optimization step
-            #     adversial_train_output.loss.backward()
-            #     adversial_non_hate_optimizer.step()
-
-            # # Calculate weighted ROC AUC
-            # adversarial_non_hate_weighted_auc = roc_auc_score(adversial_y_true, adversial_y_pred, average='weighted')
-
-            # if adversarial_non_hate_weighted_auc > best_weighted_auc['non_hate']:
-            #     best_weighted_auc['non_hate'] = adversarial_non_hate_weighted_auc
-            #     best_models['non_hate'] = adversial_non_hate_model
-            #     model_path = 'Trained Models/Best T2 Non-Hate Model/'
-            #     adversial_non_hate_model.save_pretrained(model_path)
-            #     adversial_non_hate_tokenizer.save_pretrained(model_path)
-
-            for step, batch in enumerate(adversial_non_hate_validation_dataloader):
+            for step, batch in enumerate(adversial_non_hate_train_dataloader):
                 batch = tuple(t.to(device) for t in batch)
                 b_input_ids, b_input_mask, b_labels = batch
                 adversial_non_hate_optimizer.zero_grad()
@@ -2750,6 +3322,12 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             adversial_y_pred = np.array(adversial_y_pred)
             adversarial_non_hate_weighted_auc = roc_auc_score(adversial_y_true, adversial_y_pred, average='weighted')
 
+            print(f"Weighted Adversarial Non Hate ROC AUC: {adversarial_non_hate_weighted_auc:.4f}")
+            logging.info(f"Weighted Adversarial Non Hate ROC AUC: {adversarial_non_hate_weighted_auc:.4f}")
+
+            print('\n\t - Adversial Non Hate Train loss: {:.4f}'.format(adversial_non_hate_tr_loss / adversial_non_hate_nb_tr_steps))
+            logging.info('\n\t - Adversial Non Hate Train loss: {:.4f}'.format(adversial_non_hate_tr_loss / adversial_non_hate_nb_tr_steps))
+
             if adversarial_non_hate_weighted_auc > best_weighted_auc['non_hate']:
                 best_weighted_auc['non_hate'] = adversarial_non_hate_weighted_auc
                 best_models['non_hate'] = adversial_non_hate_model
@@ -2757,34 +3335,234 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 adversial_non_hate_model.save_pretrained(model_path)
                 adversial_non_hate_tokenizer.save_pretrained(model_path)
 
+            # Calculate predicted labels for classification report
+            # adversial_val_pred_labels = np.argmax(adversial_y_pred, axis=1)
+            adversial_val_pred_labels = (adversial_y_pred > 0.5).astype(int)
+            adversial_val_true_labels = adversial_y_true
+
+            # Print classification report
+            classification_rep_adversial_val = classification_report(adversial_val_true_labels, adversial_val_pred_labels)
+            print("Classification Report - Adversarial Non-Hate Model on Non Hate Train Data :")
+            print(classification_rep_adversial_val)
+
+            logging.info("Classification Report - Adversarial Non-Hate Model on Non Hate Train Data :")
+            logging.info(classification_rep_adversial_val)
+
+
             # Set the model to evaluation mode
             adversial_non_hate_model.eval()
 
             # Tracking variables
             adversial_non_hate_val_loss = 0
             nb_val_steps = 0
+            adversial_non_hate_all_labels = []
+            adversial_non_hate_all_preds = []
 
             # Disable gradient calculations for validation
             with torch.no_grad():
-                for step, batch in enumerate(non_hate_validation_dataloader):
+                for step, batch in enumerate(validation_dataloader):
                     batch = tuple(t.to(device) for t in batch)
                     b_input_ids, b_input_mask, b_labels = batch
 
                     # Convert b_labels to one-hot encoded tensor
-                    b_labels = F.one_hot(b_labels, num_classes=2).float()
+                    b_labels_one_hot = F.one_hot(b_labels, num_classes=2).float()
 
                     # Forward pass
-                    val_output = adversial_non_hate_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+                    val_output = adversial_non_hate_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels_one_hot)
 
                     # Calculate loss and update tracking variables
-                    val_loss_step = loss_fn1(val_output.logits, b_labels)
+                    val_loss_step = loss_fn1(val_output.logits, b_labels_one_hot)
                     adversial_non_hate_val_loss += val_loss_step.item()
                     nb_val_steps += 1
+
+                    # Get true labels and predicted labels
+                    true_labels = b_labels.cpu().numpy()  # Use original b_labels here
+                    predicted_labels = torch.argmax(val_output.logits, dim=1).cpu().numpy()
+
+                    adversial_non_hate_all_labels.extend(true_labels)
+                    adversial_non_hate_all_preds.extend(predicted_labels)
 
             # Calculate the average validation loss
             avg_val_loss = adversial_non_hate_val_loss / nb_val_steps
 
-            print('\n\t - Adversarial Non-Hate Validation loss: {:.4f}'.format(avg_val_loss))
+            # Calculate classification report
+            y_true = np.array(adversial_non_hate_all_labels)
+            y_pred = np.array(adversial_non_hate_all_preds)
+
+            classification_rep = classification_report(y_true, y_pred, target_names=["class 0", "class 1"])
+
+            # classification_rep = classification_report(y_true, y_pred)
+
+            # Print the average validation loss and classification report
+            print('\n\t - Adversarial Non-Hate on Validation loss: {:.4f}'.format(avg_val_loss))
+            print("Classification Report - Adversarial Non-Hate Model on Validation data:")
+            print(classification_rep)
+
+            logging.info('\n\t - Adversarial Non-Hate on Validation loss: {:.4f}'.format(avg_val_loss))
+            logging.info("Classification Report - Adversarial Non-Hate Model on Validation data:")
+            logging.info(classification_rep)
+
+
+            # Set the model to evaluation mode
+            adversial_non_hate_model.eval()
+
+            # Tracking variables
+            adversial_non_hate_test_loss = 0
+            nb_test_steps = 0
+            adversial_non_hate_all_labels = []
+            adversial_non_hate_all_preds = []
+
+            # Disable gradient calculations for validation
+            with torch.no_grad():
+                for step, batch in enumerate(test_dataloader):
+                    batch = tuple(t.to(device) for t in batch)
+                    b_input_ids, b_input_mask, b_labels = batch
+
+                    # Convert b_labels to one-hot encoded tensor
+                    b_labels_one_hot = F.one_hot(b_labels, num_classes=2).float()
+
+                    # Forward pass
+                    test_output = adversial_non_hate_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels_one_hot)
+
+                    # Calculate loss and update tracking variables
+                    test_loss_step = loss_fn1(test_output.logits, b_labels_one_hot)
+                    adversial_non_hate_test_loss += test_loss_step.item()
+                    nb_test_steps += 1
+
+                    # Get true labels and predicted labels
+                    true_labels = b_labels.cpu().numpy()  # Use original b_labels here
+                    predicted_labels = torch.argmax(test_output.logits, dim=1).cpu().numpy()
+
+                    adversial_non_hate_all_labels.extend(true_labels)
+                    adversial_non_hate_all_preds.extend(predicted_labels)
+
+            # Calculate the average validation loss
+            avg_test_loss = adversial_non_hate_test_loss / nb_test_steps
+
+            # Calculate classification report
+            y_true = np.array(adversial_non_hate_all_labels)
+            y_pred = np.array(adversial_non_hate_all_preds)
+
+            classification_rep = classification_report(y_true, y_pred, target_names=["class 0", "class 1"])
+
+            # classification_rep = classification_report(y_true, y_pred)
+
+            # Print the average test loss and classification report
+            print('\n\t - Adversarial Non-Hate on Test loss: {:.4f}'.format(avg_test_loss))
+            print("Classification Report - Adversarial Non-Hate Model on Test data:")
+            print(classification_rep)
+
+            logging.info('\n\t - Adversarial Non-Hate on Test loss: {:.4f}'.format(avg_test_loss))
+            logging.info("Classification Report - Adversarial Non-Hate Model on Test data:")
+            logging.info(classification_rep)
+
+            # Set the model to evaluation mode
+            adversial_non_hate_model.eval()
+
+            # Tracking variables
+            adversial_non_hate_val_loss = 0
+            nb_val_steps = 0
+            adversial_non_hate_all_labels = []
+            adversial_non_hate_all_preds = []
+
+            # Disable gradient calculations for validation
+            with torch.no_grad():
+                # for step, batch in enumerate(non_hate_validation_dataloader):
+                for step, batch in enumerate(non_hate_test_dataloader):
+                    batch = tuple(t.to(device) for t in batch)
+                    b_input_ids, b_input_mask, b_labels = batch
+
+                    # Convert b_labels to one-hot encoded tensor
+                    b_labels_one_hot = F.one_hot(b_labels, num_classes=2).float()
+
+                    # Forward pass
+                    val_output = adversial_non_hate_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels_one_hot)
+
+                    # Calculate loss and update tracking variables
+                    val_loss_step = loss_fn1(val_output.logits, b_labels_one_hot)
+                    adversial_non_hate_val_loss += val_loss_step.item()
+                    nb_val_steps += 1
+
+                    # Get true labels and predicted labels
+                    true_labels = b_labels.cpu().numpy()  # Use original b_labels here
+                    predicted_labels = torch.argmax(val_output.logits, dim=1).cpu().numpy()
+
+                    adversial_non_hate_all_labels.extend(true_labels)
+                    adversial_non_hate_all_preds.extend(predicted_labels)
+
+            # Calculate the average validation loss
+            avg_val_loss = adversial_non_hate_val_loss / nb_val_steps
+
+            # Calculate classification report
+            y_true = np.array(adversial_non_hate_all_labels)
+            y_pred = np.array(adversial_non_hate_all_preds)
+
+            classification_rep = classification_report(y_true, y_pred, target_names=["class 0", "class 1"])
+            # classification_rep = classification_report(y_true, y_pred)
+
+            # Print the average validation loss and classification report
+            print('\n\t - Adversarial Non-Hate on Non-Hate Test loss: {:.4f}'.format(avg_val_loss))
+            print("Classification Report - Adversarial Non-Hate Model on Non Hate Test data:")
+            print(classification_rep)
+
+            logging.info('\n\t - Adversarial Non-Hate on Non-Hate Test loss: {:.4f}'.format(avg_val_loss))
+            logging.info("Classification Report - Adversarial Non-Hate Model on Non Hate Test data:")
+            logging.info(classification_rep)
+
+
+            # Set the model to evaluation mode
+            adversial_non_hate_model.eval()
+
+            # Tracking variables
+            adversial_non_hate_val_loss = 0
+            nb_val_steps = 0
+            adversial_non_hate_all_labels = []
+            adversial_non_hate_all_preds = []
+
+            # Disable gradient calculations for validation
+            with torch.no_grad():
+                # for step, batch in enumerate(select_validation_dataloader):
+                for step, batch in enumerate(select_test_dataloader):
+                    batch = tuple(t.to(device) for t in batch)
+                    b_input_ids, b_input_mask, b_labels = batch
+
+                    # Convert b_labels to one-hot encoded tensor
+                    b_labels_one_hot = F.one_hot(b_labels, num_classes=2).float()
+
+                    # Forward pass
+                    val_output = adversial_non_hate_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels_one_hot)
+
+                    # Calculate loss and update tracking variables
+                    val_loss_step = loss_fn1(val_output.logits, b_labels_one_hot)
+                    adversial_non_hate_val_loss += val_loss_step.item()
+                    nb_val_steps += 1
+
+                    # Get true labels and predicted labels
+                    true_labels = b_labels.cpu().numpy()  # Use original b_labels here
+                    predicted_labels = torch.argmax(val_output.logits, dim=1).cpu().numpy()
+
+                    adversial_non_hate_all_labels.extend(true_labels)
+                    adversial_non_hate_all_preds.extend(predicted_labels)
+
+            # Calculate the average validation loss
+            avg_val_loss = adversial_non_hate_val_loss / nb_val_steps
+
+            # Calculate classification report
+            y_true = np.array(adversial_non_hate_all_labels)
+            y_pred = np.array(adversial_non_hate_all_preds)
+
+            classification_rep = classification_report(y_true, y_pred, target_names=["class 0", "class 1"])
+
+            # Print the average validation loss and classification report
+            print('\n\t - Adversarial Non-Hate on Select Test loss: {:.4f}'.format(avg_val_loss))
+            print("Classification Report - Adversarial Non-Hate Model on Select Test data:")
+            print(classification_rep)
+
+            logging.info('\n\t - Adversarial Non-Hate on Select Test loss: {:.4f}'.format(avg_val_loss))
+            logging.info("Classification Report - Adversarial Non-Hate Model on Select Test data:")
+            logging.info(classification_rep)
+
+        for _ in trange(epochs, desc = 'Epoch'):
 
             # # ==========Adversial Select Training ==========
             
@@ -2796,54 +3574,7 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             adversial_select_nb_tr_examples, adversial_select_nb_tr_steps = 0, 0
             adversial_select_y_true, adversial_select_y_pred = [], []
 
-            # for step, batch in enumerate(adversial_select_validation_dataloader):
-
-            #     batch = tuple(t.to(device) for t in batch)
-            #     b_input_ids, b_input_mask, b_labels = batch
-            #     adversial_select_optimizer.zero_grad()
-
-            #     # # Forward pass
-            #     # adversial_train_output = adversial_select_model(b_input_ids, 
-            #     #                     token_type_ids = None, 
-            #     #                     attention_mask = b_input_mask, 
-            #     #                     labels = b_labels)
-                
-            #     # Forward pass
-            #     adversial_train_output = adversial_select_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
-                
-            #     # Calculate loss and update tracking variables
-            #     adversial_tr_loss = adversial_train_output.loss
-            #     adversial_select_tr_loss += adversial_tr_loss.item()
-            #     adversial_select_nb_tr_examples += b_input_ids.size(0)
-            #     adversial_select_nb_tr_steps += 1
-                
-            #     # Calculate predicted probabilities and true labels for ROC AUC
-            #     logits = adversial_train_output.logits
-            #     probs = torch.softmax(logits, dim=-1)
-            #     preds = probs[:, 1]
-            #     adversial_select_y_true.extend(b_labels.cpu().detach().numpy())
-            #     adversial_select_y_pred.extend(preds.cpu().detach().numpy())
-
-            #     # Backward pass and optimization step
-            #     adversial_train_output.loss.backward()
-            #     adversial_select_optimizer.step()
-
-            # Calculate weighted ROC AUC
-            # adversial_select_y_true = np.array(adversial_select_y_true)
-            # adversial_select_y_pred = np.array(adversial_select_y_pred)
-            # adversarial_select_weighted_auc = roc_auc_score(adversial_select_y_true[:, 1], adversial_select_y_pred, average='weighted')
-
-
-            # Save the trained models and the tokenizers
-            # model_path = 'Trained Models/'
-            # model.save_pretrained(model_path)
-            # adversial_non_hate_model.save_pretrained(model_path)
-            # adversial_select_model.save_pretrained(model_path)
-            # tokenizer.save_pretrained(model_path)
-            # adversial_non_hate_tokenizer.save_pretrained(model_path)
-            # adversial_select_tokenizer.save_pretrained(model_path)
-
-            for step, batch in enumerate(adversial_select_validation_dataloader):
+            for step, batch in enumerate(adversial_select_train_dataloader):
                 batch = tuple(t.to(device) for t in batch)
                 b_input_ids, b_input_mask, b_labels = batch
                 adversial_select_optimizer.zero_grad()
@@ -2876,6 +3607,12 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             adversial_select_y_pred = np.array(adversial_select_y_pred)
             adversarial_select_weighted_auc = roc_auc_score(adversial_select_y_true, adversial_select_y_pred, average='weighted')
 
+            print(f"Weighted Adversarial Select ROC AUC: {adversarial_select_weighted_auc:.4f}")
+            logging.info(f"Weighted Adversarial Select ROC AUC: {adversarial_select_weighted_auc:.4f}")
+
+            print('\n\t - Adversial Select Train loss: {:.4f}'.format(adversial_select_tr_loss / adversial_select_nb_tr_steps))
+            logging.info('\n\t - Adversial Select Train loss: {:.4f}'.format(adversial_select_tr_loss / adversial_select_nb_tr_steps))
+
             if adversarial_select_weighted_auc > best_weighted_auc['select']:
                 best_weighted_auc['select'] = adversarial_select_weighted_auc
                 best_models['select'] = adversial_select_model
@@ -2883,115 +3620,591 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
                 adversial_select_model.save_pretrained(model_path)
                 adversial_select_tokenizer.save_pretrained(model_path)
 
+            # Calculate predicted labels for classification report
+            # adversial_select_val_pred_labels = np.argmax(adversial_select_y_pred, axis=1)
+            adversial_select_val_pred_labels = (adversial_select_y_pred > 0.5).astype(int)
+            adversial_select_val_true_labels = adversial_select_y_true
+
+            # Print classification report
+            classification_rep_adversial_select_val = classification_report(adversial_select_val_true_labels, adversial_select_val_pred_labels)
+            print("Classification Report - Adversarial Select Model on Select Train Data:")
+            print(classification_rep_adversial_select_val)
+
+            logging.info("Classification Report - Adversarial Select Model on Select Train Data:")
+            logging.info(classification_rep_adversial_select_val)
+
+
             # Set the model to evaluation mode
             adversial_select_model.eval()
 
             # Tracking variables
             adversial_select_val_loss = 0
             nb_val_steps = 0
+            adversial_select_all_labels = []
+            adversial_select_all_preds = []
 
             # Disable gradient calculations for validation
             with torch.no_grad():
-                for step, batch in enumerate(select_validation_dataloader):
+                for step, batch in enumerate(validation_dataloader):
                     batch = tuple(t.to(device) for t in batch)
                     b_input_ids, b_input_mask, b_labels = batch
 
                     # Convert b_labels to one-hot encoded tensor
-                    b_labels = F.one_hot(b_labels, num_classes=2).float()
+                    b_labels_one_hot = F.one_hot(b_labels, num_classes=2).float()
 
                     # Forward pass
-                    val_output = adversial_select_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+                    val_output = adversial_select_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels_one_hot)
 
                     # Calculate loss and update tracking variables
-                    val_loss_step = loss_fn1(val_output.logits, b_labels)
+                    val_loss_step = loss_fn1(val_output.logits, b_labels_one_hot)
                     adversial_select_val_loss += val_loss_step.item()
                     nb_val_steps += 1
+
+                    # Get true labels and predicted labels
+                    true_labels = b_labels.cpu().numpy()  # Use original b_labels here
+                    predicted_labels = torch.argmax(val_output.logits, dim=1).cpu().numpy()
+
+                    adversial_select_all_labels.extend(true_labels)
+                    adversial_select_all_preds.extend(predicted_labels)
 
             # Calculate the average validation loss
             avg_val_loss = adversial_select_val_loss / nb_val_steps
 
-            print('\n\t - Adversarial Select Validation loss: {:.4f}'.format(avg_val_loss))
+            # Calculate classification report
+            y_true = np.array(adversial_select_all_labels)
+            y_pred = np.array(adversial_select_all_preds)
 
-            
+            classification_rep = classification_report(y_true, y_pred, target_names=["class 0", "class 1"])
+
+            # Print the average validation loss and classification report
+            print('\n\t - Adversarial Select Validation loss: {:.4f}'.format(avg_val_loss))
+            print("Classification Report - Adversarial Select Model on Validation Data:")
+            print(classification_rep)
+
+            logging.info('\n\t - Adversarial Select Validation loss: {:.4f}'.format(avg_val_loss))
+            logging.info("Classification Report - Adversarial Select Model on Validation Data:")
+            logging.info(classification_rep)
+
+
+            # Set the model to evaluation mode
+            adversial_select_model.eval()
+
+            # Tracking variables
+            adversial_select_val_loss = 0
+            nb_val_steps = 0
+            adversial_select_all_labels = []
+            adversial_select_all_preds = []
+
+            # Disable gradient calculations for validation
+            with torch.no_grad():
+                for step, batch in enumerate(test_dataloader):
+                    batch = tuple(t.to(device) for t in batch)
+                    b_input_ids, b_input_mask, b_labels = batch
+
+                    # Convert b_labels to one-hot encoded tensor
+                    b_labels_one_hot = F.one_hot(b_labels, num_classes=2).float()
+
+                    # Forward pass
+                    val_output = adversial_select_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels_one_hot)
+
+                    # Calculate loss and update tracking variables
+                    val_loss_step = loss_fn1(val_output.logits, b_labels_one_hot)
+                    adversial_select_val_loss += val_loss_step.item()
+                    nb_val_steps += 1
+
+                    # Get true labels and predicted labels
+                    true_labels = b_labels.cpu().numpy()  # Use original b_labels here
+                    predicted_labels = torch.argmax(val_output.logits, dim=1).cpu().numpy()
+
+                    adversial_select_all_labels.extend(true_labels)
+                    adversial_select_all_preds.extend(predicted_labels)
+
+            # Calculate the average Test loss
+            avg_val_loss = adversial_select_val_loss / nb_val_steps
+
+            # Calculate classification report
+            y_true = np.array(adversial_select_all_labels)
+            y_pred = np.array(adversial_select_all_preds)
+
+            classification_rep = classification_report(y_true, y_pred, target_names=["class 0", "class 1"])
+
+            # Print the average Test loss and classification report
+            print('\n\t - Adversarial Select Test loss: {:.4f}'.format(avg_val_loss))
+            print("Classification Report - Adversarial Select Model on Test Data:")
+            print(classification_rep)
+
+            logging.info('\n\t - Adversarial Select Test loss: {:.4f}'.format(avg_val_loss))
+            logging.info("Classification Report - Adversarial Select Model on Test Data:")
+            logging.info(classification_rep)
+
+            # Set the model to evaluation mode
+            adversial_select_model.eval()
+
+            # Tracking variables
+            adversial_select_val_loss = 0
+            nb_val_steps = 0
+            adversial_select_all_labels = []
+            adversial_select_all_preds = []
+
+            # Disable gradient calculations for validation
+            with torch.no_grad():
+                # for step, batch in enumerate(non_hate_validation_dataloader):
+                for step, batch in enumerate(non_hate_test_dataloader):
+                    batch = tuple(t.to(device) for t in batch)
+                    b_input_ids, b_input_mask, b_labels = batch
+
+                    # Convert b_labels to one-hot encoded tensor
+                    b_labels_one_hot = F.one_hot(b_labels, num_classes=2).float()
+
+                    # Forward pass
+                    val_output = adversial_select_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels_one_hot)
+
+                    # Calculate loss and update tracking variables
+                    val_loss_step = loss_fn1(val_output.logits, b_labels_one_hot)
+                    adversial_select_val_loss += val_loss_step.item()
+                    nb_val_steps += 1
+
+                    # Get true labels and predicted labels
+                    true_labels = b_labels.cpu().numpy()  # Use original b_labels here
+                    predicted_labels = torch.argmax(val_output.logits, dim=1).cpu().numpy()
+
+                    adversial_select_all_labels.extend(true_labels)
+                    adversial_select_all_preds.extend(predicted_labels)
+
+            # Calculate the average validation loss
+            avg_val_loss = adversial_select_val_loss / nb_val_steps
+
+            # Calculate classification report
+            y_true = np.array(adversial_select_all_labels)
+            y_pred = np.array(adversial_select_all_preds)
+
+            classification_rep = classification_report(y_true, y_pred, target_names=["class 0", "class 1"])
+
+            # Print the average validation loss and classification report
+            print('\n\t - Adversarial Select on Non-Hate Test loss: {:.4f}'.format(avg_val_loss))
+            print("Classification Report - Adversarial Select Model on Non-Hate Test Data:")
+            print(classification_rep)
+
+            logging.info('\n\t - Adversarial Select on Non-Hate Test loss: {:.4f}'.format(avg_val_loss))
+            logging.info("Classification Report - Adversarial Select Model on Non-Hate Test Data:")
+            logging.info(classification_rep)
+
+            # Set the model to evaluation mode
+            adversial_select_model.eval()
+
+            # Tracking variables
+            adversial_select_val_loss = 0
+            nb_val_steps = 0
+            adversial_select_all_labels = []
+            adversial_select_all_preds = []
+
+            # Disable gradient calculations for validation
+            with torch.no_grad():
+                # for step, batch in enumerate(select_validation_dataloader):
+                for step, batch in enumerate(select_test_dataloader):
+                    batch = tuple(t.to(device) for t in batch)
+                    b_input_ids, b_input_mask, b_labels = batch
+
+                    # Convert b_labels to one-hot encoded tensor
+                    b_labels_one_hot = F.one_hot(b_labels, num_classes=2).float()
+
+                    # Forward pass
+                    val_output = adversial_select_model(b_input_ids, attention_mask=b_input_mask, labels=b_labels_one_hot)
+
+                    # Calculate loss and update tracking variables
+                    val_loss_step = loss_fn1(val_output.logits, b_labels_one_hot)
+                    adversial_select_val_loss += val_loss_step.item()
+                    nb_val_steps += 1
+
+                    # Get true labels and predicted labels
+                    true_labels = b_labels.cpu().numpy()  # Use original b_labels here
+                    predicted_labels = torch.argmax(val_output.logits, dim=1).cpu().numpy()
+
+                    adversial_select_all_labels.extend(true_labels)
+                    adversial_select_all_preds.extend(predicted_labels)
+
+            # Calculate the average validation loss
+            avg_val_loss = adversial_select_val_loss / nb_val_steps
+
+            # Calculate classification report
+            y_true = np.array(adversial_select_all_labels)
+            y_pred = np.array(adversial_select_all_preds)
+
+            classification_rep = classification_report(y_true, y_pred, target_names=["class 0", "class 1"])
+
+            # Print the average validation loss and classification report
+            print('\n\t - Adversarial Select on Select Test loss: {:.4f}'.format(avg_val_loss))
+            print("Classification Report - Adversarial Select Model on Select Test Data:")
+            print(classification_rep)
+
+            logging.info('\n\t - Adversarial Select on Select Test loss: {:.4f}'.format(avg_val_loss))
+            logging.info("Classification Report - Adversarial Select Model on Select Test Data:")
+            logging.info(classification_rep)
 
             print(f'Trained models and tokenizer are saved to {model_path}')
+            logging.info(f'Trained models and tokenizer are saved to {model_path}')
                 
 
             # ========== Validation (Original Test) ==========
 
-            # Set model to evaluation mode
-            model.eval()
+            # # Set model to evaluation mode
+            # model.eval()
 
-            # Tracking variables 
-            val_accuracy = []
-            val_precision = []
-            val_recall = []
-            val_specificity = []
-            all_labels = []
-            all_preds = []
+            # # Tracking variables 
+            # val_accuracy = []
+            # val_precision = []
+            # val_recall = []
+            # val_specificity = []
+            # all_labels = []
+            # all_preds = []
 
-            for batch in validation_dataloader:
-                batch = tuple(t.to(device) for t in batch)
-                b_input_ids, b_input_mask, b_labels = batch
-                with torch.no_grad():
-                    # # Forward pass
-                    # eval_output = model(b_input_ids, 
-                    #                     token_type_ids = None, 
-                    #                     attention_mask = b_input_mask)
-                    eval_output = model(b_input_ids, 
-                                        attention_mask = b_input_mask)
-                logits = eval_output.logits.detach().cpu().numpy()
-                label_ids = b_labels.to('cpu').numpy()
+            # for batch in validation_dataloader:
+            #     batch = tuple(t.to(device) for t in batch)
+            #     b_input_ids, b_input_mask, b_labels = batch
+            #     with torch.no_grad():
+            #         # # Forward pass
+            #         # eval_output = model(b_input_ids, 
+            #         #                     token_type_ids = None, 
+            #         #                     attention_mask = b_input_mask)
+            #         eval_output = model(b_input_ids, 
+            #                             attention_mask = b_input_mask)
+            #     logits = eval_output.logits.detach().cpu().numpy()
+            #     label_ids = b_labels.to('cpu').numpy()
 
-                all_labels.extend(label_ids.flatten().tolist())
-                all_preds.extend(np.round(np.argmax(logits, axis=1)).flatten().tolist())
+            #     all_labels.extend(label_ids.flatten().tolist())
+            #     all_preds.extend(np.round(np.argmax(logits, axis=1)).flatten().tolist())
 
-                # Calculate validation metrics
-                b_accuracy, b_precision, b_recall, b_specificity = b_metrics(logits, label_ids)
-                val_accuracy.append(b_accuracy)
-                # Update precision only when (tp + fp) !=0; ignore nan
-                if b_precision != 'nan': val_precision.append(b_precision)
-                # Update recall only when (tp + fn) !=0; ignore nan
-                if b_recall != 'nan': val_recall.append(b_recall)
-                # Update specificity only when (tn + fp) !=0; ignore nan
-                if b_specificity != 'nan': val_specificity.append(b_specificity)
+            #     # Calculate validation metrics
+            #     b_accuracy, b_precision, b_recall, b_specificity = b_metrics(logits, label_ids)
+            #     val_accuracy.append(b_accuracy)
+            #     # Update precision only when (tp + fp) !=0; ignore nan
+            #     if b_precision != 'nan': val_precision.append(b_precision)
+            #     # Update recall only when (tp + fn) !=0; ignore nan
+            #     if b_recall != 'nan': val_recall.append(b_recall)
+            #     # Update specificity only when (tn + fp) !=0; ignore nan
+            #     if b_specificity != 'nan': val_specificity.append(b_specificity)
 
-            # Set model to evaluation mode
-            triplet_model.eval()
+            # # Set model to evaluation mode
+            # triplet_model.eval()
 
-            # Tracking variables 
-            triplet_val_accuracy = []
-            triplet_val_precision = []
-            triplet_val_recall = []
-            triplet_val_specificity = []
-            triplet_all_labels = []
-            triplet_all_preds = []
+            # # Tracking variables 
+            # triplet_val_accuracy = []
+            # triplet_val_precision = []
+            # triplet_val_recall = []
+            # triplet_val_specificity = []
+            # triplet_all_labels = []
+            # triplet_all_preds = []
 
-            for batch in validation_dataloader:
-                batch = tuple(t.to(device) for t in batch)
-                b_input_ids, b_input_mask, b_labels = batch
-                with torch.no_grad():
-                    # # Forward pass
-                    # eval_output = model(b_input_ids, 
-                    #                     token_type_ids = None, 
-                    #                     attention_mask = b_input_mask)
-                    triplet_eval_output = triplet_model(b_input_ids, 
-                                        attention_mask = b_input_mask)
-                triplet_logits = triplet_eval_output.logits.detach().cpu().numpy()
-                triplet_label_ids = b_labels.to('cpu').numpy()
+            # for batch in validation_dataloader:
+            #     batch = tuple(t.to(device) for t in batch)
+            #     b_input_ids, b_input_mask, b_labels = batch
+            #     with torch.no_grad():
+            #         # # Forward pass
+            #         # eval_output = model(b_input_ids, 
+            #         #                     token_type_ids = None, 
+            #         #                     attention_mask = b_input_mask)
+            #         triplet_eval_output = triplet_model(b_input_ids, 
+            #                             attention_mask = b_input_mask)
+            #     triplet_logits = triplet_eval_output.logits.detach().cpu().numpy()
+            #     triplet_label_ids = b_labels.to('cpu').numpy()
 
-                triplet_all_labels.extend(triplet_label_ids.flatten().tolist())
-                triplet_all_preds.extend(np.round(np.argmax(triplet_logits, axis=1)).flatten().tolist())
+            #     triplet_all_labels.extend(triplet_label_ids.flatten().tolist())
+            #     triplet_all_preds.extend(np.round(np.argmax(triplet_logits, axis=1)).flatten().tolist())
 
-                # Calculate validation metrics
-                b_accuracy, b_precision, b_recall, b_specificity = b_metrics(triplet_logits, triplet_label_ids)
-                triplet_val_accuracy.append(b_accuracy)
-                # Update precision only when (tp + fp) !=0; ignore nan
-                if b_precision != 'nan': triplet_val_precision.append(b_precision)
-                # Update recall only when (tp + fn) !=0; ignore nan
-                if b_recall != 'nan': triplet_val_recall.append(b_recall)
-                # Update specificity only when (tn + fp) !=0; ignore nan
-                if b_specificity != 'nan': triplet_val_specificity.append(b_specificity)
+            #     # Calculate validation metrics
+            #     b_accuracy, b_precision, b_recall, b_specificity = b_metrics(triplet_logits, triplet_label_ids)
+            #     triplet_val_accuracy.append(b_accuracy)
+            #     # Update precision only when (tp + fp) !=0; ignore nan
+            #     if b_precision != 'nan': triplet_val_precision.append(b_precision)
+            #     # Update recall only when (tp + fn) !=0; ignore nan
+            #     if b_recall != 'nan': triplet_val_recall.append(b_recall)
+            #     # Update specificity only when (tn + fp) !=0; ignore nan
+            #     if b_specificity != 'nan': triplet_val_specificity.append(b_specificity)
+
+            # # Set model to evaluation mode
+            # adversial_non_hate_model.eval()
+
+            # # Tracking variables 
+            # adversial_non_hate_actual_val_accuracy = []
+            # adversial_non_hate_actual_val_precision = []
+            # adversial_non_hate_actual_val_recall = []
+            # adversial_non_hate_actual_val_specificity = []
+            # adversial_non_hate_all_labels = []
+            # adversial_non_hate_all_preds = []
+
+            # for batch in validation_dataloader:
+            #     batch = tuple(t.to(device) for t in batch)
+            #     b_input_ids, b_input_mask, b_labels = batch
+            #     with torch.no_grad():
+            #         adversial_non_hate_eval_output = adversial_non_hate_model(b_input_ids, attention_mask=b_input_mask)
+            #     logits = adversial_non_hate_eval_output.logits.detach().cpu().numpy()
+            #     label_ids = b_labels.to('cpu').numpy()
+
+            #     adversial_non_hate_all_labels.extend(label_ids.flatten().tolist())
+            #     adversial_non_hate_all_preds.extend(np.round(np.argmax(logits, axis=1)).flatten().tolist())
+
+            #     # Calculate validation metrics
+            #     b_accuracy, b_precision, b_recall, b_specificity = b_metrics(logits, label_ids)
+            #     adversial_non_hate_actual_val_accuracy.append(b_accuracy)
+            #     if b_precision != 'nan': adversial_non_hate_actual_val_precision.append(b_precision)
+            #     if b_recall != 'nan': adversial_non_hate_actual_val_recall.append(b_recall)
+            #     if b_specificity != 'nan': adversial_non_hate_actual_val_specificity.append(b_specificity)
+
+
+            # # Set model to evaluation mode
+            # adversial_select_model.eval()
+
+            # # Tracking variables 
+            # adversial_select_actual_val_accuracy = []
+            # adversial_select_actual_val_precision = []
+            # adversial_select_actual_val_recall = []
+            # adversial_select_actual_val_specificity = []
+            # adversial_select_all_labels = []
+            # adversial_select_all_preds = []
+
+            # for batch in validation_dataloader:
+            #     batch = tuple(t.to(device) for t in batch)
+            #     b_input_ids, b_input_mask, b_labels = batch
+            #     with torch.no_grad():
+            #         adversial_select_eval_output = adversial_select_model(b_input_ids, attention_mask=b_input_mask)
+            #     logits = adversial_select_eval_output.logits.detach().cpu().numpy()
+            #     label_ids = b_labels.to('cpu').numpy()
+
+            #     adversial_select_all_labels.extend(label_ids.flatten().tolist())
+            #     adversial_select_all_preds.extend(np.round(np.argmax(logits, axis=1)).flatten().tolist())
+
+            #     # Calculate validation metrics
+            #     b_accuracy, b_precision, b_recall, b_specificity = b_metrics(logits, label_ids)
+            #     adversial_select_actual_val_accuracy.append(b_accuracy)
+            #     if b_precision != 'nan': adversial_select_actual_val_precision.append(b_precision)
+            #     if b_recall != 'nan': adversial_select_actual_val_recall.append(b_recall)
+            #     if b_specificity != 'nan': adversial_select_actual_val_specificity.append(b_specificity)
+                    
+            # # # Set model to evaluation mode
+            # # adversial_non_hate_model.eval()
+
+            # # # Tracking variables 
+            # # adversial_non_hate_val_accuracy = []
+            # # adversial_non_hate_val_precision = []
+            # # adversial_non_hate_val_recall = []
+            # # adversial_non_hate_val_specificity = []
+            # # adversial_non_hate_all_labels = []
+            # # adversial_non_hate_all_preds = []
+
+            # # for batch in validation_dataloader:
+            # #     batch = tuple(t.to(device) for t in batch)
+            # #     b_input_ids, b_input_mask, b_labels = batch
+            # #     with torch.no_grad():
+            # #         # Forward pass
+            # #         eval_output = adversial_non_hate_model(b_input_ids, 
+            # #                             token_type_ids = None, 
+            # #                             attention_mask = b_input_mask)
+            # #     logits = eval_output.logits.detach().cpu().numpy()
+            # #     label_ids = b_labels.to('cpu').numpy()
+
+            # #     adversial_non_hate_all_labels.extend(label_ids.flatten().tolist())
+            # #     adversial_non_hate_all_preds.extend(np.round(np.argmax(logits, axis=1)).flatten().tolist())
+
+            # #     # Calculate validation metrics
+            # #     b_accuracy, b_precision, b_recall, b_specificity = b_metrics(logits, label_ids)
+            # #     adversial_non_hate_val_accuracy.append(b_accuracy)
+            # #     # Update precision only when (tp + fp) !=0; ignore nan
+            # #     if b_precision != 'nan': adversial_non_hate_val_precision.append(b_precision)
+            # #     # Update recall only when (tp + fn) !=0; ignore nan
+            # #     if b_recall != 'nan': adversial_non_hate_val_recall.append(b_recall)
+            # #     # Update specificity only when (tn + fp) !=0; ignore nan
+            # #     if b_specificity != 'nan': adversial_non_hate_val_specificity.append(b_specificity)
+
+            # # ========== Select Validation ==========
+
+            # # Set model to evaluation mode
+            # model.eval()
+
+            # # Tracking variables 
+            # select_val_accuracy = []
+            # select_val_precision = []
+            # select_val_recall = []
+            # select_val_specificity = []
+            # select_all_labels = []
+            # select_all_preds = []
+
+            # for batch in select_validation_dataloader:
+            #     batch = tuple(t.to(device) for t in batch)
+            #     b_input_ids, b_input_mask, b_labels = batch
+            #     with torch.no_grad():
+            #         # # Forward pass
+            #         # eval_output = model(b_input_ids, 
+            #         #                     token_type_ids = None, 
+            #         #                     attention_mask = b_input_mask)
+                    
+            #         eval_output = model(b_input_ids, 
+            #                             attention_mask = b_input_mask)
+            #     logits = eval_output.logits.detach().cpu().numpy()
+            #     label_ids = b_labels.to('cpu').numpy()
+
+            #     select_all_labels.extend(label_ids.flatten().tolist())
+            #     select_all_preds.extend(np.round(np.argmax(logits, axis=1)).flatten().tolist())
+
+            #     # Calculate validation metrics
+            #     b_accuracy, b_precision, b_recall, b_specificity = b_metrics(logits, label_ids)
+            #     select_val_accuracy.append(b_accuracy)
+            #     # Update precision only when (tp + fp) !=0; ignore nan
+            #     if b_precision != 'nan': select_val_precision.append(b_precision)
+            #     # Update recall only when (tp + fn) !=0; ignore nan
+            #     if b_recall != 'nan': select_val_recall.append(b_recall)
+            #     # Update specificity only when (tn + fp) !=0; ignore nan
+            #     if b_specificity != 'nan': select_val_specificity.append(b_specificity)
+
+            # # Set model to evaluation mode
+            # triplet_model.eval()
+
+            # # Tracking variables 
+            # triplet_select_val_accuracy = []
+            # triplet_select_val_precision = []
+            # triplet_select_val_recall = []
+            # triplet_select_val_specificity = []
+            # triplet_select_all_labels = []
+            # triplet_select_all_preds = []
+
+            # for batch in select_validation_dataloader:
+            #     batch = tuple(t.to(device) for t in batch)
+            #     b_input_ids, b_input_mask, b_labels = batch
+            #     with torch.no_grad():
+            #         # # Forward pass
+            #         # eval_output = model(b_input_ids, 
+            #         #                     token_type_ids = None, 
+            #         #                     attention_mask = b_input_mask)
+                    
+            #         triplet_eval_output = triplet_model(b_input_ids, 
+            #                             attention_mask = b_input_mask)
+            #     triplet_logits = triplet_eval_output.logits.detach().cpu().numpy()
+            #     triplet_label_ids = b_labels.to('cpu').numpy()
+
+            #     triplet_select_all_labels.extend(triplet_label_ids.flatten().tolist())
+            #     triplet_select_all_preds.extend(np.round(np.argmax(triplet_logits, axis=1)).flatten().tolist())
+
+            #     # Calculate validation metrics
+            #     b_accuracy, b_precision, b_recall, b_specificity = b_metrics(triplet_logits, triplet_label_ids)
+            #     triplet_select_val_accuracy.append(b_accuracy)
+            #     # Update precision only when (tp + fp) !=0; ignore nan
+            #     if b_precision != 'nan': triplet_select_val_precision.append(b_precision)
+            #     # Update recall only when (tp + fn) !=0; ignore nan
+            #     if b_recall != 'nan': triplet_select_val_recall.append(b_recall)
+            #     # Update specificity only when (tn + fp) !=0; ignore nan
+            #     if b_specificity != 'nan': triplet_select_val_specificity.append(b_specificity)
+                    
+            # # Set model to evaluation mode
+            # adversial_select_model.eval()
+
+            # # Tracking variables 
+            # adversial_select_val_accuracy = []
+            # adversial_select_val_precision = []
+            # adversial_select_val_recall = []
+            # adversial_select_val_specificity = []
+            # adversial_select_all_labels = []
+            # adversial_select_all_preds = []
+
+            # for batch in select_validation_dataloader:
+            #     batch = tuple(t.to(device) for t in batch)
+            #     b_input_ids, b_input_mask, b_labels = batch
+            #     with torch.no_grad():
+            #         # # Forward pass
+            #         # eval_output = adversial_select_model(b_input_ids, 
+            #         #                     token_type_ids = None, 
+            #         #                     attention_mask = b_input_mask)
+            #         eval_output = adversial_select_model(b_input_ids,
+            #                             attention_mask = b_input_mask)
+            #     logits = eval_output.logits.detach().cpu().numpy()
+            #     label_ids = b_labels.to('cpu').numpy()
+
+            #     adversial_select_all_labels.extend(label_ids.flatten().tolist())
+            #     adversial_select_all_preds.extend(np.round(np.argmax(logits, axis=1)).flatten().tolist())
+
+            #     # Calculate validation metrics
+            #     b_accuracy, b_precision, b_recall, b_specificity = b_metrics(logits, label_ids)
+            #     adversial_select_val_accuracy.append(b_accuracy)
+            #     # Update precision only when (tp + fp) !=0; ignore nan
+            #     if b_precision != 'nan': adversial_select_val_precision.append(b_precision)
+            #     # Update recall only when (tp + fn) !=0; ignore nan
+            #     if b_recall != 'nan': adversial_select_val_recall.append(b_recall)
+            #     # Update specificity only when (tn + fp) !=0; ignore nan
+            #     if b_specificity != 'nan': adversial_select_val_specificity.append(b_specificity)
+
+            # # ========== Non Hate Validation ==========
+
+            # # Set model to evaluation mode
+            # model.eval()
+
+            # # Tracking variables 
+            # non_hate_val_accuracy = []
+            # non_hate_val_precision = []
+            # non_hate_val_recall = []
+            # non_hate_val_specificity = []
+            # non_hate_all_labels = []
+            # non_hate_all_preds = []
+
+            # for batch in non_hate_validation_dataloader:
+            #     batch = tuple(t.to(device) for t in batch)
+            #     b_input_ids, b_input_mask, b_labels = batch
+            #     with torch.no_grad():
+            #         # # Forward pass
+            #         # eval_output = model(b_input_ids, 
+            #         #                     token_type_ids = None, 
+            #         #                     attention_mask = b_input_mask)
+            #         eval_output = model(b_input_ids, 
+            #                             attention_mask = b_input_mask)
+            #     logits = eval_output.logits.detach().cpu().numpy()
+            #     label_ids = b_labels.to('cpu').numpy()
+
+            #     non_hate_all_labels.extend(label_ids.flatten().tolist())
+            #     non_hate_all_preds.extend(np.round(np.argmax(logits, axis=1)).flatten().tolist())
+
+            #     # Calculate validation metrics
+            #     b_accuracy, b_precision, b_recall, b_specificity = b_metrics(logits, label_ids)
+            #     non_hate_val_accuracy.append(b_accuracy)
+            #     # Update precision only when (tp + fp) !=0; ignore nan
+            #     if b_precision != 'nan': non_hate_val_precision.append(b_precision)
+            #     # Update recall only when (tp + fn) !=0; ignore nan
+            #     if b_recall != 'nan': non_hate_val_recall.append(b_recall)
+            #     # Update specificity only when (tn + fp) !=0; ignore nan
+            #     if b_specificity != 'nan': non_hate_val_specificity.append(b_specificity)
+
+            # # Set model to evaluation mode
+            # triplet_model.eval()
+
+            # # Tracking variables 
+            # triplet_non_hate_val_accuracy = []
+            # triplet_non_hate_val_precision = []
+            # triplet_non_hate_val_recall = []
+            # triplet_non_hate_val_specificity = []
+            # triplet_non_hate_all_labels = []
+            # triplet_non_hate_all_preds = []
+
+            # for batch in non_hate_validation_dataloader:
+            #     batch = tuple(t.to(device) for t in batch)
+            #     b_input_ids, b_input_mask, b_labels = batch
+            #     with torch.no_grad():
+            #         # # Forward pass
+            #         # eval_output = model(b_input_ids, 
+            #         #                     token_type_ids = None, 
+            #         #                     attention_mask = b_input_mask)
+            #         triplet_eval_output = triplet_model(b_input_ids, 
+            #                             attention_mask = b_input_mask)
+            #     triplet_logits = triplet_eval_output.logits.detach().cpu().numpy()
+            #     triplet_label_ids = b_labels.to('cpu').numpy()
+
+            #     triplet_non_hate_all_labels.extend(triplet_label_ids.flatten().tolist())
+            #     triplet_non_hate_all_preds.extend(np.round(np.argmax(triplet_logits, axis=1)).flatten().tolist())
+
+            #     # Calculate validation metrics
+            #     b_accuracy, b_precision, b_recall, b_specificity = b_metrics(triplet_logits, triplet_label_ids)
+            #     triplet_non_hate_val_accuracy.append(b_accuracy)
+            #     # Update precision only when (tp + fp) !=0; ignore nan
+            #     if b_precision != 'nan': triplet_non_hate_val_precision.append(b_precision)
+            #     # Update recall only when (tp + fn) !=0; ignore nan
+            #     if b_recall != 'nan': triplet_non_hate_val_recall.append(b_recall)
+            #     # Update specificity only when (tn + fp) !=0; ignore nan
+            #     if b_specificity != 'nan': triplet_non_hate_val_specificity.append(b_specificity)
                     
             # # Set model to evaluation mode
             # adversial_non_hate_model.eval()
@@ -3004,13 +4217,15 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             # adversial_non_hate_all_labels = []
             # adversial_non_hate_all_preds = []
 
-            # for batch in validation_dataloader:
+            # for batch in non_hate_validation_dataloader:
             #     batch = tuple(t.to(device) for t in batch)
             #     b_input_ids, b_input_mask, b_labels = batch
             #     with torch.no_grad():
-            #         # Forward pass
+            #         # # Forward pass
+            #         # eval_output = adversial_non_hate_model(b_input_ids, 
+            #         #                     token_type_ids = None, 
+            #         #                     attention_mask = b_input_mask)
             #         eval_output = adversial_non_hate_model(b_input_ids, 
-            #                             token_type_ids = None, 
             #                             attention_mask = b_input_mask)
             #     logits = eval_output.logits.detach().cpu().numpy()
             #     label_ids = b_labels.to('cpu').numpy()
@@ -3027,312 +4242,84 @@ def gridsearch(input_data_file, dataset_name, sys_out, model_descriptor: str,
             #     if b_recall != 'nan': adversial_non_hate_val_recall.append(b_recall)
             #     # Update specificity only when (tn + fp) !=0; ignore nan
             #     if b_specificity != 'nan': adversial_non_hate_val_specificity.append(b_specificity)
-
-            # ========== Select Validation ==========
-
-            # Set model to evaluation mode
-            model.eval()
-
-            # Tracking variables 
-            select_val_accuracy = []
-            select_val_precision = []
-            select_val_recall = []
-            select_val_specificity = []
-            select_all_labels = []
-            select_all_preds = []
-
-            for batch in select_validation_dataloader:
-                batch = tuple(t.to(device) for t in batch)
-                b_input_ids, b_input_mask, b_labels = batch
-                with torch.no_grad():
-                    # # Forward pass
-                    # eval_output = model(b_input_ids, 
-                    #                     token_type_ids = None, 
-                    #                     attention_mask = b_input_mask)
-                    
-                    eval_output = model(b_input_ids, 
-                                        attention_mask = b_input_mask)
-                logits = eval_output.logits.detach().cpu().numpy()
-                label_ids = b_labels.to('cpu').numpy()
-
-                select_all_labels.extend(label_ids.flatten().tolist())
-                select_all_preds.extend(np.round(np.argmax(logits, axis=1)).flatten().tolist())
-
-                # Calculate validation metrics
-                b_accuracy, b_precision, b_recall, b_specificity = b_metrics(logits, label_ids)
-                select_val_accuracy.append(b_accuracy)
-                # Update precision only when (tp + fp) !=0; ignore nan
-                if b_precision != 'nan': select_val_precision.append(b_precision)
-                # Update recall only when (tp + fn) !=0; ignore nan
-                if b_recall != 'nan': select_val_recall.append(b_recall)
-                # Update specificity only when (tn + fp) !=0; ignore nan
-                if b_specificity != 'nan': select_val_specificity.append(b_specificity)
-
-            # Set model to evaluation mode
-            triplet_model.eval()
-
-            # Tracking variables 
-            triplet_select_val_accuracy = []
-            triplet_select_val_precision = []
-            triplet_select_val_recall = []
-            triplet_select_val_specificity = []
-            triplet_select_all_labels = []
-            triplet_select_all_preds = []
-
-            for batch in select_validation_dataloader:
-                batch = tuple(t.to(device) for t in batch)
-                b_input_ids, b_input_mask, b_labels = batch
-                with torch.no_grad():
-                    # # Forward pass
-                    # eval_output = model(b_input_ids, 
-                    #                     token_type_ids = None, 
-                    #                     attention_mask = b_input_mask)
-                    
-                    triplet_eval_output = triplet_model(b_input_ids, 
-                                        attention_mask = b_input_mask)
-                triplet_logits = triplet_eval_output.logits.detach().cpu().numpy()
-                triplet_label_ids = b_labels.to('cpu').numpy()
-
-                triplet_select_all_labels.extend(triplet_label_ids.flatten().tolist())
-                triplet_select_all_preds.extend(np.round(np.argmax(triplet_logits, axis=1)).flatten().tolist())
-
-                # Calculate validation metrics
-                b_accuracy, b_precision, b_recall, b_specificity = b_metrics(triplet_logits, triplet_label_ids)
-                triplet_select_val_accuracy.append(b_accuracy)
-                # Update precision only when (tp + fp) !=0; ignore nan
-                if b_precision != 'nan': triplet_select_val_precision.append(b_precision)
-                # Update recall only when (tp + fn) !=0; ignore nan
-                if b_recall != 'nan': triplet_select_val_recall.append(b_recall)
-                # Update specificity only when (tn + fp) !=0; ignore nan
-                if b_specificity != 'nan': triplet_select_val_specificity.append(b_specificity)
-                    
-            # Set model to evaluation mode
-            adversial_select_model.eval()
-
-            # Tracking variables 
-            adversial_select_val_accuracy = []
-            adversial_select_val_precision = []
-            adversial_select_val_recall = []
-            adversial_select_val_specificity = []
-            adversial_select_all_labels = []
-            adversial_select_all_preds = []
-
-            for batch in select_validation_dataloader:
-                batch = tuple(t.to(device) for t in batch)
-                b_input_ids, b_input_mask, b_labels = batch
-                with torch.no_grad():
-                    # # Forward pass
-                    # eval_output = adversial_select_model(b_input_ids, 
-                    #                     token_type_ids = None, 
-                    #                     attention_mask = b_input_mask)
-                    eval_output = adversial_select_model(b_input_ids,
-                                        attention_mask = b_input_mask)
-                logits = eval_output.logits.detach().cpu().numpy()
-                label_ids = b_labels.to('cpu').numpy()
-
-                adversial_select_all_labels.extend(label_ids.flatten().tolist())
-                adversial_select_all_preds.extend(np.round(np.argmax(logits, axis=1)).flatten().tolist())
-
-                # Calculate validation metrics
-                b_accuracy, b_precision, b_recall, b_specificity = b_metrics(logits, label_ids)
-                adversial_select_val_accuracy.append(b_accuracy)
-                # Update precision only when (tp + fp) !=0; ignore nan
-                if b_precision != 'nan': adversial_select_val_precision.append(b_precision)
-                # Update recall only when (tp + fn) !=0; ignore nan
-                if b_recall != 'nan': adversial_select_val_recall.append(b_recall)
-                # Update specificity only when (tn + fp) !=0; ignore nan
-                if b_specificity != 'nan': adversial_select_val_specificity.append(b_specificity)
-
-            # ========== Non Hate Validation ==========
-
-            # Set model to evaluation mode
-            model.eval()
-
-            # Tracking variables 
-            non_hate_val_accuracy = []
-            non_hate_val_precision = []
-            non_hate_val_recall = []
-            non_hate_val_specificity = []
-            non_hate_all_labels = []
-            non_hate_all_preds = []
-
-            for batch in non_hate_validation_dataloader:
-                batch = tuple(t.to(device) for t in batch)
-                b_input_ids, b_input_mask, b_labels = batch
-                with torch.no_grad():
-                    # # Forward pass
-                    # eval_output = model(b_input_ids, 
-                    #                     token_type_ids = None, 
-                    #                     attention_mask = b_input_mask)
-                    eval_output = model(b_input_ids, 
-                                        attention_mask = b_input_mask)
-                logits = eval_output.logits.detach().cpu().numpy()
-                label_ids = b_labels.to('cpu').numpy()
-
-                non_hate_all_labels.extend(label_ids.flatten().tolist())
-                non_hate_all_preds.extend(np.round(np.argmax(logits, axis=1)).flatten().tolist())
-
-                # Calculate validation metrics
-                b_accuracy, b_precision, b_recall, b_specificity = b_metrics(logits, label_ids)
-                non_hate_val_accuracy.append(b_accuracy)
-                # Update precision only when (tp + fp) !=0; ignore nan
-                if b_precision != 'nan': non_hate_val_precision.append(b_precision)
-                # Update recall only when (tp + fn) !=0; ignore nan
-                if b_recall != 'nan': non_hate_val_recall.append(b_recall)
-                # Update specificity only when (tn + fp) !=0; ignore nan
-                if b_specificity != 'nan': non_hate_val_specificity.append(b_specificity)
-
-            # Set model to evaluation mode
-            triplet_model.eval()
-
-            # Tracking variables 
-            triplet_non_hate_val_accuracy = []
-            triplet_non_hate_val_precision = []
-            triplet_non_hate_val_recall = []
-            triplet_non_hate_val_specificity = []
-            triplet_non_hate_all_labels = []
-            triplet_non_hate_all_preds = []
-
-            for batch in non_hate_validation_dataloader:
-                batch = tuple(t.to(device) for t in batch)
-                b_input_ids, b_input_mask, b_labels = batch
-                with torch.no_grad():
-                    # # Forward pass
-                    # eval_output = model(b_input_ids, 
-                    #                     token_type_ids = None, 
-                    #                     attention_mask = b_input_mask)
-                    triplet_eval_output = triplet_model(b_input_ids, 
-                                        attention_mask = b_input_mask)
-                triplet_logits = triplet_eval_output.logits.detach().cpu().numpy()
-                triplet_label_ids = b_labels.to('cpu').numpy()
-
-                triplet_non_hate_all_labels.extend(triplet_label_ids.flatten().tolist())
-                triplet_non_hate_all_preds.extend(np.round(np.argmax(triplet_logits, axis=1)).flatten().tolist())
-
-                # Calculate validation metrics
-                b_accuracy, b_precision, b_recall, b_specificity = b_metrics(triplet_logits, triplet_label_ids)
-                triplet_non_hate_val_accuracy.append(b_accuracy)
-                # Update precision only when (tp + fp) !=0; ignore nan
-                if b_precision != 'nan': triplet_non_hate_val_precision.append(b_precision)
-                # Update recall only when (tp + fn) !=0; ignore nan
-                if b_recall != 'nan': triplet_non_hate_val_recall.append(b_recall)
-                # Update specificity only when (tn + fp) !=0; ignore nan
-                if b_specificity != 'nan': triplet_non_hate_val_specificity.append(b_specificity)
-                    
-            # Set model to evaluation mode
-            adversial_non_hate_model.eval()
-
-            # Tracking variables 
-            adversial_non_hate_val_accuracy = []
-            adversial_non_hate_val_precision = []
-            adversial_non_hate_val_recall = []
-            adversial_non_hate_val_specificity = []
-            adversial_non_hate_all_labels = []
-            adversial_non_hate_all_preds = []
-
-            for batch in non_hate_validation_dataloader:
-                batch = tuple(t.to(device) for t in batch)
-                b_input_ids, b_input_mask, b_labels = batch
-                with torch.no_grad():
-                    # # Forward pass
-                    # eval_output = adversial_non_hate_model(b_input_ids, 
-                    #                     token_type_ids = None, 
-                    #                     attention_mask = b_input_mask)
-                    eval_output = adversial_non_hate_model(b_input_ids, 
-                                        attention_mask = b_input_mask)
-                logits = eval_output.logits.detach().cpu().numpy()
-                label_ids = b_labels.to('cpu').numpy()
-
-                adversial_non_hate_all_labels.extend(label_ids.flatten().tolist())
-                adversial_non_hate_all_preds.extend(np.round(np.argmax(logits, axis=1)).flatten().tolist())
-
-                # Calculate validation metrics
-                b_accuracy, b_precision, b_recall, b_specificity = b_metrics(logits, label_ids)
-                adversial_non_hate_val_accuracy.append(b_accuracy)
-                # Update precision only when (tp + fp) !=0; ignore nan
-                if b_precision != 'nan': adversial_non_hate_val_precision.append(b_precision)
-                # Update recall only when (tp + fn) !=0; ignore nan
-                if b_recall != 'nan': adversial_non_hate_val_recall.append(b_recall)
-                # Update specificity only when (tn + fp) !=0; ignore nan
-                if b_specificity != 'nan': adversial_non_hate_val_specificity.append(b_specificity)
-
-            print(f"Weighted ROC AUC: {weighted_auc:.4f}")
-            print(f"Weighted Adversarial Non Hate ROC AUC: {adversarial_non_hate_weighted_auc:.4f}")
-            print(f"Weighted Adversarial Select ROC AUC: {adversarial_select_weighted_auc:.4f}")
-            print(f"Weighted Triplet ROC AUC: {triplet_weighted_auc:.4f}")
-            
-
-            print('\n\t - Train loss: {:.4f}'.format(tr_loss / nb_tr_steps))
-            print('\n\t - Triplet Train loss: {:.4f}'.format(triplet_tr_loss / triplet_nb_tr_steps))
-            print('\n\t - Adversial Non Hate Train loss: {:.4f}'.format(adversial_non_hate_tr_loss / adversial_non_hate_nb_tr_steps))
-            print('\n\t - Adversial Select Train loss: {:.4f}'.format(adversial_select_tr_loss / adversial_select_nb_tr_steps))
             
             
-            print('\t - Validation Accuracy: {:.4f}'.format(sum(val_accuracy)/len(val_accuracy)))
-            print('\t - Validation Precision: {:.4f}'.format(sum(val_precision)/len(val_precision)) if len(val_precision)>0 else '\t - Validation Precision: NaN')
-            print('\t - Validation Recall: {:.4f}'.format(sum(val_recall)/len(val_recall)) if len(val_recall)>0 else '\t - Validation Recall: NaN')
-            print('\t - Validation Specificity: {:.4f}\n'.format(sum(val_specificity)/len(val_specificity)) if len(val_specificity)>0 else '\t - Validation Specificity: NaN')
+            # print('\t - Validation Accuracy: {:.4f}'.format(sum(val_accuracy)/len(val_accuracy)))
+            # print('\t - Validation Precision: {:.4f}'.format(sum(val_precision)/len(val_precision)) if len(val_precision)>0 else '\t - Validation Precision: NaN')
+            # print('\t - Validation Recall: {:.4f}'.format(sum(val_recall)/len(val_recall)) if len(val_recall)>0 else '\t - Validation Recall: NaN')
+            # print('\t - Validation Specificity: {:.4f}\n'.format(sum(val_specificity)/len(val_specificity)) if len(val_specificity)>0 else '\t - Validation Specificity: NaN')
 
-            print('\t - Triplet Validation Accuracy: {:.4f}'.format(sum(triplet_val_accuracy)/len(triplet_val_accuracy)))
-            print('\t - Triplet Validation Precision: {:.4f}'.format(sum(triplet_val_precision)/len(triplet_val_precision)) if len(triplet_val_precision)>0 else '\t - Triplet Validation Precision: NaN')
-            print('\t - Triplet Validation Recall: {:.4f}'.format(sum(triplet_val_recall)/len(triplet_val_recall)) if len(triplet_val_recall)>0 else '\t - Triplet Validation Recall: NaN')
-            print('\t - Triplet Validation Specificity: {:.4f}\n'.format(sum(triplet_val_specificity)/len(triplet_val_specificity)) if len(triplet_val_specificity)>0 else '\t - Triplet Validation Specificity: NaN')
+            # print('\t - Triplet Validation Accuracy: {:.4f}'.format(sum(triplet_val_accuracy)/len(triplet_val_accuracy)))
+            # print('\t - Triplet Validation Precision: {:.4f}'.format(sum(triplet_val_precision)/len(triplet_val_precision)) if len(triplet_val_precision)>0 else '\t - Triplet Validation Precision: NaN')
+            # print('\t - Triplet Validation Recall: {:.4f}'.format(sum(triplet_val_recall)/len(triplet_val_recall)) if len(triplet_val_recall)>0 else '\t - Triplet Validation Recall: NaN')
+            # print('\t - Triplet Validation Specificity: {:.4f}\n'.format(sum(triplet_val_specificity)/len(triplet_val_specificity)) if len(triplet_val_specificity)>0 else '\t - Triplet Validation Specificity: NaN')
+
+            # print('\t - Adversial Non-Hate Validation Accuracy: {:.4f}'.format(sum(adversial_non_hate_actual_val_accuracy)/len(adversial_non_hate_actual_val_accuracy)))
+            # print('\t - Adversial Non-Hate Validation Precision: {:.4f}'.format(sum(adversial_non_hate_actual_val_precision)/len(adversial_non_hate_actual_val_precision)) if len(adversial_non_hate_actual_val_precision)>0 else '\t - Adversial Non-Hate Validation Precision: NaN')
+            # print('\t - Adversial Non-Hate Validation Recall: {:.4f}'.format(sum(adversial_non_hate_actual_val_recall)/len(adversial_non_hate_actual_val_recall)) if len(adversial_non_hate_actual_val_recall)>0 else '\t - Adversial Non-Hate Validation Recall: NaN')
+            # print('\t - Adversial Non-Hate Validation Specificity: {:.4f}\n'.format(sum(adversial_non_hate_actual_val_specificity)/len(adversial_non_hate_actual_val_specificity)) if len(adversial_non_hate_actual_val_specificity)>0 else '\t - Adversial Non-Hate Validation Specificity: NaN')
+
+            # print('\t - Adversial Select Validation Accuracy: {:.4f}'.format(sum(adversial_select_actual_val_accuracy)/len(adversial_select_actual_val_accuracy)))
+            # print('\t - Adversial Select Validation Precision: {:.4f}'.format(sum(adversial_select_actual_val_precision)/len(adversial_select_actual_val_precision)) if len(adversial_select_actual_val_precision)>0 else '\t - Adversial Select Validation Precision: NaN')
+            # print('\t - Adversial Select Validation Recall: {:.4f}'.format(sum(adversial_select_actual_val_recall)/len(adversial_select_actual_val_recall)) if len(adversial_select_actual_val_recall)>0 else '\t - Adversial Select Validation Recall: NaN')
+            # print('\t - Adversial Select Validation Specificity: {:.4f}\n'.format(sum(adversial_select_actual_val_specificity)/len(adversial_select_actual_val_specificity)) if len(adversial_select_actual_val_specificity)>0 else '\t - Adversial Select Validation Specificity: NaN')
+
             
-            # print('\t - Adversial Validation Accuracy: {:.4f}'.format(sum(adversial_val_accuracy)/len(adversial_val_accuracy)))
-            # print('\t - Adversial Validation Precision: {:.4f}'.format(sum(adversial_val_precision)/len(adversial_val_precision)) if len(adversial_val_precision)>0 else '\t - Adversial Validation Precision: NaN')
-            # print('\t - Adversial Validation Recall: {:.4f}'.format(sum(adversial_val_recall)/len(adversial_val_recall)) if len(adversial_val_recall)>0 else '\t - Adversial Validation Recall: NaN')
-            # print('\t - Adversial Validation Specificity: {:.4f}\n'.format(sum(adversial_val_specificity)/len(adversial_val_specificity)) if len(adversial_val_specificity)>0 else '\t - Adversial Validation Specificity: NaN')
+            # # print('\t - Adversial Validation Accuracy: {:.4f}'.format(sum(adversial_val_accuracy)/len(adversial_val_accuracy)))
+            # # print('\t - Adversial Validation Precision: {:.4f}'.format(sum(adversial_val_precision)/len(adversial_val_precision)) if len(adversial_val_precision)>0 else '\t - Adversial Validation Precision: NaN')
+            # # print('\t - Adversial Validation Recall: {:.4f}'.format(sum(adversial_val_recall)/len(adversial_val_recall)) if len(adversial_val_recall)>0 else '\t - Adversial Validation Recall: NaN')
+            # # print('\t - Adversial Validation Specificity: {:.4f}\n'.format(sum(adversial_val_specificity)/len(adversial_val_specificity)) if len(adversial_val_specificity)>0 else '\t - Adversial Validation Specificity: NaN')
 
-            print('\t - Non Hate Validation Accuracy: {:.4f}'.format(sum(non_hate_val_accuracy)/len(non_hate_val_accuracy)))
-            print('\t - Non Hate Validation Precision: {:.4f}'.format(sum(non_hate_val_precision)/len(non_hate_val_precision)) if len(non_hate_val_precision)>0 else '\t - Non Hate Validation Precision: NaN')
-            print('\t - Non Hate Validation Recall: {:.4f}'.format(sum(non_hate_val_recall)/len(non_hate_val_recall)) if len(non_hate_val_recall)>0 else '\t - Non Hate Validation Recall: NaN')
-            print('\t - Non Hate Validation Specificity: {:.4f}\n'.format(sum(non_hate_val_specificity)/len(non_hate_val_specificity)) if len(non_hate_val_specificity)>0 else '\t - Non Hate Validation Specificity: NaN')
+            # print('\t - Non Hate Validation Accuracy: {:.4f}'.format(sum(non_hate_val_accuracy)/len(non_hate_val_accuracy)))
+            # print('\t - Non Hate Validation Precision: {:.4f}'.format(sum(non_hate_val_precision)/len(non_hate_val_precision)) if len(non_hate_val_precision)>0 else '\t - Non Hate Validation Precision: NaN')
+            # print('\t - Non Hate Validation Recall: {:.4f}'.format(sum(non_hate_val_recall)/len(non_hate_val_recall)) if len(non_hate_val_recall)>0 else '\t - Non Hate Validation Recall: NaN')
+            # print('\t - Non Hate Validation Specificity: {:.4f}\n'.format(sum(non_hate_val_specificity)/len(non_hate_val_specificity)) if len(non_hate_val_specificity)>0 else '\t - Non Hate Validation Specificity: NaN')
 
-            print('\t - Select Validation Accuracy: {:.4f}'.format(sum(select_val_accuracy)/len(select_val_accuracy)))
-            print('\t - Select Validation Precision: {:.4f}'.format(sum(select_val_precision)/len(select_val_precision)) if len(select_val_precision)>0 else '\t - Select Validation Precision: NaN')
-            print('\t - Select Validation Recall: {:.4f}'.format(sum(select_val_recall)/len(select_val_recall)) if len(select_val_recall)>0 else '\t - Select Validation Recall: NaN')
-            print('\t - Select Validation Specificity: {:.4f}\n'.format(sum(select_val_specificity)/len(select_val_specificity)) if len(select_val_specificity)>0 else '\t - Select Validation Specificity: NaN')
+            # print('\t - Select Validation Accuracy: {:.4f}'.format(sum(select_val_accuracy)/len(select_val_accuracy)))
+            # print('\t - Select Validation Precision: {:.4f}'.format(sum(select_val_precision)/len(select_val_precision)) if len(select_val_precision)>0 else '\t - Select Validation Precision: NaN')
+            # print('\t - Select Validation Recall: {:.4f}'.format(sum(select_val_recall)/len(select_val_recall)) if len(select_val_recall)>0 else '\t - Select Validation Recall: NaN')
+            # print('\t - Select Validation Specificity: {:.4f}\n'.format(sum(select_val_specificity)/len(select_val_specificity)) if len(select_val_specificity)>0 else '\t - Select Validation Specificity: NaN')
             
-            print('\t - Adversial Non Hate Validation Accuracy: {:.4f}'.format(sum(adversial_non_hate_val_accuracy)/len(adversial_non_hate_val_accuracy)))
-            print('\t - Adversial Non Hate Validation Precision: {:.4f}'.format(sum(adversial_non_hate_val_precision)/len(adversial_non_hate_val_precision)) if len(adversial_non_hate_val_precision)>0 else '\t - Adversial Non Hate Validation Precision: NaN')
-            print('\t - Adversial Non Hate Validation Recall: {:.4f}'.format(sum(adversial_non_hate_val_recall)/len(adversial_non_hate_val_recall)) if len(adversial_non_hate_val_recall)>0 else '\t - Adversial Non Hate Validation Recall: NaN')
-            print('\t - Adversial Non Hate Validation Specificity: {:.4f}\n'.format(sum(adversial_non_hate_val_specificity)/len(adversial_non_hate_val_specificity)) if len(adversial_non_hate_val_specificity)>0 else '\t - Adversial Non Hate Validation Specificity: NaN')
+            # print('\t - Adversial Non Hate Validation Accuracy: {:.4f}'.format(sum(adversial_non_hate_val_accuracy)/len(adversial_non_hate_val_accuracy)))
+            # print('\t - Adversial Non Hate Validation Precision: {:.4f}'.format(sum(adversial_non_hate_val_precision)/len(adversial_non_hate_val_precision)) if len(adversial_non_hate_val_precision)>0 else '\t - Adversial Non Hate Validation Precision: NaN')
+            # print('\t - Adversial Non Hate Validation Recall: {:.4f}'.format(sum(adversial_non_hate_val_recall)/len(adversial_non_hate_val_recall)) if len(adversial_non_hate_val_recall)>0 else '\t - Adversial Non Hate Validation Recall: NaN')
+            # print('\t - Adversial Non Hate Validation Specificity: {:.4f}\n'.format(sum(adversial_non_hate_val_specificity)/len(adversial_non_hate_val_specificity)) if len(adversial_non_hate_val_specificity)>0 else '\t - Adversial Non Hate Validation Specificity: NaN')
 
-            print('\t - Adversial Select Validation Accuracy: {:.4f}'.format(sum(adversial_select_val_accuracy)/len(adversial_select_val_accuracy)))
-            print('\t - Adversial Select Validation Precision: {:.4f}'.format(sum(adversial_select_val_precision)/len(adversial_select_val_precision)) if len(adversial_select_val_precision)>0 else '\t - Adversial Select Validation Precision: NaN')
-            print('\t - Adversial Select Validation Recall: {:.4f}'.format(sum(adversial_select_val_recall)/len(adversial_select_val_recall)) if len(adversial_select_val_recall)>0 else '\t - Adversial Select Validation Recall: NaN')
-            print('\t - Adversial Select Validation Specificity: {:.4f}\n'.format(sum(adversial_select_val_specificity)/len(adversial_select_val_specificity)) if len(adversial_select_val_specificity)>0 else '\t - Adversial Select Validation Specificity: NaN')
+            # print('\t - Adversial Select Validation Accuracy: {:.4f}'.format(sum(adversial_select_val_accuracy)/len(adversial_select_val_accuracy)))
+            # print('\t - Adversial Select Validation Precision: {:.4f}'.format(sum(adversial_select_val_precision)/len(adversial_select_val_precision)) if len(adversial_select_val_precision)>0 else '\t - Adversial Select Validation Precision: NaN')
+            # print('\t - Adversial Select Validation Recall: {:.4f}'.format(sum(adversial_select_val_recall)/len(adversial_select_val_recall)) if len(adversial_select_val_recall)>0 else '\t - Adversial Select Validation Recall: NaN')
+            # print('\t - Adversial Select Validation Specificity: {:.4f}\n'.format(sum(adversial_select_val_specificity)/len(adversial_select_val_specificity)) if len(adversial_select_val_specificity)>0 else '\t - Adversial Select Validation Specificity: NaN')
 
             
 
-            print("Validation Classification Report :")
-            print(classification_report(all_labels, all_preds))
+            # print("Validation Classification Report :")
+            # print(classification_report(all_labels, all_preds))
 
-            print("Triplet Validation Classification Report :")
-            print(classification_report(triplet_all_labels, triplet_all_preds))
+            # print("Triplet Validation Classification Report :")
+            # print(classification_report(triplet_all_labels, triplet_all_preds))
 
-            print("Select Validation Classification Report :")
-            print(classification_report(select_all_labels, select_all_preds))
+            # print("Select Validation Classification Report :")
+            # print(classification_report(select_all_labels, select_all_preds))
 
-            print("Non Hate Validation Classification Report :")
-            print(classification_report(non_hate_all_labels, non_hate_all_preds))
+            # print("Non Hate Validation Classification Report :")
+            # print(classification_report(non_hate_all_labels, non_hate_all_preds))
             
-            # print("Adversial Validation Classification Report :")
-            # print(classification_report(adversial_all_labels, adversial_all_preds))
+            # # print("Adversial Validation Classification Report :")
+            # # print(classification_report(adversial_all_labels, adversial_all_preds))
 
-            print("Adversial Select Validation Classification Report :")
-            print(classification_report(adversial_select_all_labels, adversial_select_all_preds))
+            # print("Adversial Select Validation Classification Report :")
+            # print(classification_report(adversial_select_all_labels, adversial_select_all_preds))
 
-            print("Triplet Select Validation Classification Report :")
-            print(classification_report(triplet_select_all_labels, triplet_select_all_preds))
+            # print("Triplet Select Validation Classification Report :")
+            # print(classification_report(triplet_select_all_labels, triplet_select_all_preds))
 
             
 
-            print("Adversial Non Hate Validation Classification Report :")
-            print(classification_report(adversial_non_hate_all_labels, adversial_non_hate_all_preds))
+            # print("Adversial Non Hate Validation Classification Report :")
+            # print(classification_report(adversial_non_hate_all_labels, adversial_non_hate_all_preds))
 
-            print("Triplet Non Hate Validation Classification Report :")
-            print(classification_report(triplet_non_hate_all_labels, triplet_non_hate_all_preds))
+            # print("Triplet Non Hate Validation Classification Report :")
+            # print(classification_report(triplet_non_hate_all_labels, triplet_non_hate_all_preds))
 
 
 
